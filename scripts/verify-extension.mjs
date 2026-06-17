@@ -16,7 +16,6 @@ const requiredFiles = [
   "docs/validation.md",
   "fixtures/demo.html",
   "LICENSE",
-  "scratch/README.md",
   "scripts/smoke-extension.mjs",
   "scripts/dev-extension.mjs",
 ];

@@ -101,6 +101,56 @@ async function gatewayHealth(cfg, signal) {
   return callGateway(cfg, "/health", { method: "GET", signal });
 }
 
+// Stable per-tab session id so the gateway can keep conversation continuity.
+const tabSessions = new Map();
+function sessionIdFor(tabId) {
+  let id = tabSessions.get(tabId);
+  if (!id) {
+    id = `agee_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    tabSessions.set(tabId, id);
+  }
+  return id;
+}
+
+// Conversational turn through the user's gateway (/v1/voice/turns).
+// The gateway classifies chat vs. home-machine agent runs and replies with
+// display text; we render it. Page-DOM actions are a later wave.
+async function runViaGateway(tabId, instruction, cfg, signal) {
+  await saveTaskState(tabId, { status: "running", instruction, step: 0, lastResult: "sending to gateway" });
+  send(tabId, { cmd: "progress", text: "thinking…" });
+  throwIfAborted(signal);
+
+  let screen;
+  try {
+    const snap = await ask(tabId, { cmd: "snapshot" });
+    screen = snapToScreen(snap);
+  } catch {
+    screen = undefined; // restricted page; send without screen context
+  }
+
+  throwIfAborted(signal);
+  const data = await callGateway(cfg, "/v1/voice/turns", {
+    signal,
+    body: {
+      source: "agee-extension",
+      session_id: sessionIdFor(tabId),
+      transcript: instruction,
+      screen,
+    },
+  });
+
+  const reply = String(data.display || data.text || data.speak || "").trim();
+  const runs = Array.isArray(data.agent_runs) ? data.agent_runs : [];
+  const summary = reply || (runs.length ? `Started ${runs.length} agent run(s).` : "Done.");
+  send(tabId, { cmd: "done", summary });
+  await saveTaskState(tabId, {
+    status: "done",
+    instruction,
+    step: 1,
+    lastResult: `[${data.classification || "chat"}] ${summary.slice(0, 400)}`,
+  });
+}
+
 function send(tabId, msg) {
   chrome.tabs.sendMessage(tabId, msg).catch(() => {});
 }
@@ -335,8 +385,16 @@ async function runAgent(tabId, instruction, controller) {
 
   try {
     const cfg = await getConfig();
+
+    // Prefer the user's own agent gateway (the pipe). Conversational + home-machine
+    // agent runs; customize behavior by editing the gateway's SYSTEM_PROMPT.
+    if (cfg.gatewayUrl) {
+      await runViaGateway(tabId, instruction, cfg, signal);
+      return;
+    }
+
     if (!cfg.apiKey) {
-      send(tabId, { cmd: "error", text: "No API key set. Click the agee toolbar icon → Options to add your Anthropic key." });
+      send(tabId, { cmd: "error", text: "No gateway URL and no API key set. Click the agee toolbar icon → Options to set a gateway URL or add your Anthropic key." });
       return;
     }
 
