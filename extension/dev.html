@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>agee dev</title>
+    <style>
+      body {
+        background: #101114;
+        color: #f4f4f5;
+        font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        padding: 32px;
+      }
+      main {
+        max-width: 760px;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0 0 8px;
+      }
+      p {
+        color: #b8bac0;
+        line-height: 1.5;
+      }
+      code {
+        background: #1b1d22;
+        border: 1px solid #30333a;
+        border-radius: 6px;
+        color: #d6e2ff;
+        padding: 2px 5px;
+      }
+      button {
+        background: #f4f4f5;
+        border: 0;
+        border-radius: 8px;
+        color: #111;
+        cursor: pointer;
+        font: inherit;
+        margin: 8px 8px 0 0;
+        padding: 10px 14px;
+      }
+      #status {
+        background: #17191f;
+        border: 1px solid #30333a;
+        border-radius: 8px;
+        margin-top: 18px;
+        min-height: 72px;
+        padding: 14px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>agee dev bridge</h1>
+      <p>
+        Keep this extension page open while editing. It polls the local dev server
+        and calls <code>chrome.runtime.reload()</code> when extension files change.
+      </p>
+      <p>
+        This is intentionally separate from your normal browsing. Use the local
+        demo page for extension development, not your active tabs.
+      </p>
+      <button id="reload-extension">Reload extension now</button>
+      <button id="reload-localhost">Reload localhost tabs</button>
+      <div id="status">Starting...</div>
+    </main>
+    <script src="dev.js"></script>
+  </body>
+</html>

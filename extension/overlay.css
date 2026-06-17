@@ -1,0 +1,180 @@
+#agee-root {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: block;
+  pointer-events: none;
+  font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+#agee-launcher {
+  appearance: none;
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  width: 52px;
+  height: 52px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+  background: #111114;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.34);
+  color: #f4f4f5;
+  cursor: grab;
+  font: 600 12px/1 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  letter-spacing: 0;
+  pointer-events: auto;
+  text-transform: lowercase;
+  touch-action: none;
+}
+#agee-launcher:hover {
+  background: #1b1b20;
+}
+#agee-launcher:active {
+  cursor: grabbing;
+}
+#agee-panel {
+  display: none;
+  pointer-events: auto;
+  position: absolute;
+  top: 14%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, 92vw);
+  background: #0d0d0f;
+  color: #f2f2f2;
+  border: 1px solid #2a2a2e;
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+#agee-root.agee-open #agee-panel {
+  display: block;
+}
+#agee-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #1d1d20;
+}
+#agee-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #555;
+  flex: 0 0 auto;
+}
+#agee-dot.running {
+  background: #f5a623;
+  animation: agee-pulse 1s infinite;
+}
+#agee-dot.done {
+  background: #35c759;
+}
+#agee-dot.error {
+  background: #ff453a;
+}
+@keyframes agee-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+#agee-input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: #f2f2f2;
+  font-size: 15px;
+}
+#agee-input::placeholder {
+  color: #6b6b70;
+}
+#agee-voice,
+#agee-stop {
+  appearance: none;
+  border: 1px solid #34343a;
+  border-radius: 8px;
+  background: #19191d;
+  color: #d7d7dc;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 8px 10px;
+}
+#agee-voice:hover,
+#agee-stop:hover {
+  background: #222228;
+}
+#agee-voice.listening {
+  border-color: #f5a623;
+  color: #ffd58a;
+}
+#agee-stop {
+  display: none;
+}
+#agee-stop.visible {
+  display: inline-block;
+  border-color: #6b2a2a;
+  color: #ff9b92;
+}
+#agee-log {
+  max-height: 44vh;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+#agee-log:empty {
+  display: none;
+}
+.agee-row {
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agee-you {
+  color: #9bbcff;
+}
+.agee-agee {
+  color: #cfcfd4;
+}
+.agee-done {
+  color: #35c759;
+}
+.agee-error {
+  color: #ff6b61;
+}
+.agee-confirm {
+  color: #f2f2f2;
+  border-top: 1px solid #1d1d20;
+  border-bottom: 1px solid #1d1d20;
+  background: #141417;
+}
+.agee-confirm-text {
+  margin-bottom: 10px;
+}
+.agee-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+.agee-confirm-actions button {
+  appearance: none;
+  border: 1px solid #34343a;
+  border-radius: 8px;
+  background: #202026;
+  color: #ededf0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 8px 10px;
+}
+.agee-confirm-actions button[data-agee-confirm="yes"] {
+  border-color: #3b6e4a;
+  color: #9be5ad;
+}
+.agee-confirm-actions button:hover {
+  background: #292932;
+}

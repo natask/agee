@@ -1,0 +1,8 @@
+scratch/
+node_modules/
+.DS_Store
+*.log
+
+# Local-only: raw thinking and agent context, never published
+__LOG__.md
+.context/

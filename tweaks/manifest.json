@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "agee — tweak any website",
+  "version": "0.1.0",
+  "description": "Pop the bar, speak or type, and agee tweaks the page you're on. Save your tweaks; they re-apply on revisit. No login to start.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["<all_urls>", "https://api.anthropic.com/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "onboarding.html",
+  "action": { "default_title": "agee — setup & settings" }
+}
