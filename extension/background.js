@@ -58,8 +58,47 @@ const TOOLS = [
 ];
 
 async function getConfig() {
-  const { ageeApiKey, ageeModel } = await chrome.storage.local.get(["ageeApiKey", "ageeModel"]);
-  return { apiKey: ageeApiKey, model: ageeModel || DEFAULT_MODEL };
+  const { ageeApiKey, ageeModel, ageeGatewayUrl, ageeGatewayToken } = await chrome.storage.local.get([
+    "ageeApiKey",
+    "ageeModel",
+    "ageeGatewayUrl",
+    "ageeGatewayToken",
+  ]);
+  return {
+    apiKey: ageeApiKey,
+    model: ageeModel || DEFAULT_MODEL,
+    gatewayUrl: String(ageeGatewayUrl || "").replace(/\/+$/, ""),
+    gatewayToken: String(ageeGatewayToken || ""),
+  };
+}
+
+// Pipe a request into the user's own agent gateway instead of the model vendor.
+// Returns the parsed JSON body for the given path (e.g. "/v1/chat", "/health").
+async function callGateway(cfg, path, { method = "POST", body, signal } = {}) {
+  if (!cfg.gatewayUrl) {
+    throw new Error("No gateway URL set. Open agee Options and set the Agent gateway URL.");
+  }
+  const headers = { "content-type": "application/json" };
+  if (cfg.gatewayToken) headers.authorization = `Bearer ${cfg.gatewayToken}`;
+  const resp = await fetch(`${cfg.gatewayUrl}${path}`, {
+    method,
+    signal,
+    headers,
+    body: body == null ? undefined : JSON.stringify(body),
+  });
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`gateway ${resp.status}: ${text.slice(0, 300)}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`gateway returned non-JSON: ${text.slice(0, 200)}`);
+  }
+}
+
+async function gatewayHealth(cfg, signal) {
+  return callGateway(cfg, "/health", { method: "GET", signal });
 }
 
 function send(tabId, msg) {
@@ -212,13 +251,57 @@ async function callClaude({ apiKey, model }, messages, signal, { system = SYSTEM
   return resp.json();
 }
 
+// Map a page snapshot into the gateway's screen-context shape so the same
+// home-machine context format works for browser and Android surfaces.
+function snapToScreen(snap) {
+  const nodes = (snap.elements || []).slice(0, MAX_ELEMENTS).map((e) => ({
+    text: e.label,
+    clickable: true,
+  }));
+  return {
+    available: true,
+    package: snap.url || "",
+    class: snap.title || "",
+    summary: elementsText(snap),
+    nodes,
+  };
+}
+
+async function describePageViaGateway(tabId, cfg, signal) {
+  await saveTaskState(tabId, { status: "running", instruction: "Describe this page", step: 0, lastResult: "reading page (gateway)" });
+  send(tabId, { cmd: "progress", text: "reading the page…" });
+  throwIfAborted(signal);
+  const snap = await ask(tabId, { cmd: "snapshot" });
+  throwIfAborted(signal);
+  const data = await callGateway(cfg, "/v1/chat", {
+    signal,
+    body: {
+      source: "agee-extension",
+      screen: snapToScreen(snap),
+      messages: [
+        { role: "user", content: "Describe this page in 3-5 compact bullets. Include what it is and what the user can do here. Do not claim you took any action." },
+      ],
+    },
+  });
+  const text = String(data.text || "").trim() || "The gateway returned an empty description.";
+  send(tabId, { cmd: "done", summary: text });
+  await saveTaskState(tabId, { status: "done", instruction: "Describe this page", step: 1, lastResult: text.slice(0, 500) });
+}
+
 async function describePage(tabId, controller) {
   const signal = controller.signal;
 
   try {
     const cfg = await getConfig();
+
+    // Prefer the user's own agent gateway (the pipe) when configured.
+    if (cfg.gatewayUrl) {
+      await describePageViaGateway(tabId, cfg, signal);
+      return;
+    }
+
     if (!cfg.apiKey) {
-      send(tabId, { cmd: "error", text: "No API key set. Click the agee toolbar icon -> Options to add your Anthropic key." });
+      send(tabId, { cmd: "error", text: "No gateway URL and no API key set. Click the agee toolbar icon -> Options to set a gateway URL or add your Anthropic key." });
       return;
     }
 

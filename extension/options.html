@@ -31,10 +31,21 @@
 
     <label for="model">Model</label>
     <input id="model" type="text" placeholder="claude-opus-4-8" />
-    <div class="hint">Default: claude-opus-4-8.</div>
+    <div class="hint">Default: claude-opus-4-8. Used only for the direct (bring-your-own-key) path.</div>
+
+    <hr style="margin:28px 0;border:0;border-top:1px solid #eee" />
+
+    <label for="gatewayUrl">Agent gateway URL</label>
+    <input id="gatewayUrl" type="text" placeholder="http://10.147.17.10:8788" />
+    <div class="hint">Pipe requests to your own agent infrastructure instead of calling the model vendor directly. Leave blank to use the direct key path.</div>
+
+    <label for="gatewayToken">Gateway token</label>
+    <input id="gatewayToken" type="password" placeholder="(optional)" />
+    <div class="hint">Sent as <code>Authorization: Bearer …</code>. Stored locally in this browser only. Leave blank on a trusted private network.</div>
 
     <div>
       <button id="save">Save</button>
+      <button id="testGateway" style="background:#2563eb">Test gateway</button>
       <span id="status"></span>
     </div>
 
