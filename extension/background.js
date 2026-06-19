@@ -2,13 +2,16 @@
 // Holds the API key, runs the agent loop, talks to the page via the content script.
 // The model call lives here (not the page) so we control the network boundary.
 
-import { parseSettingsIntent } from "./settings-intent.js";
+import { parseSettingsIntent, parseProfileQueryIntent } from "./settings-intent.js";
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MODEL = "claude-opus-4-8";
 const MAX_STEPS = 20;
 const MAX_ELEMENTS = 100;
 const ALLOWED_NAVIGATION_PROTOCOLS = new Set(["http:", "https:"]);
+// Cues run concurrently: the user keeps talking, each utterance is its own lane.
+// Keyed by cueId (a per-cue string), each value is { controller, tabId } so we
+// can cancel one cue or all cues on a tab without blocking new ones.
 const tasks = new Map();
 
 const SYSTEM_PROMPT = `You are agee, an agent that operates a web browser on the user's behalf.
@@ -120,14 +123,19 @@ async function getGatewayProfile(cfg, signal) {
 
 // Patch + persist a profile change through the gateway (PUT /v1/agent/profile)
 // and cache the authoritative result so the settings surface stays in sync.
-async function putGatewayProfile(cfg, patch, signal) {
+async function putGatewayProfile(cfg, patch, signal, source = "agee-extension") {
   const payload = await callGateway(cfg, "/v1/agent/profile", {
     method: "PUT",
     signal,
-    body: { profile: patch },
+    body: { profile: patch, source },
   });
   await chrome.storage.local.set({ [PROFILE_CACHE_KEY]: payload });
   return payload;
+}
+
+// Read the queryable prompt-change history from the gateway.
+async function getGatewayProfileHistory(cfg, signal) {
+  return callGateway(cfg, "/v1/agent/profile/history?system_prompt_only=1&limit=50", { method: "GET", signal });
 }
 
 // "Change settings by talking to the agent": if the instruction is a settings
@@ -135,7 +143,7 @@ async function putGatewayProfile(cfg, patch, signal) {
 // gateway profile endpoints, then render a confirmation. Returns true when the
 // instruction was handled as a settings change (so the caller skips the normal
 // conversational turn); false otherwise.
-async function maybeApplySettingsChange(tabId, instruction, cfg, signal) {
+async function maybeApplySettingsChange(tabId, instruction, cfg, signal, cueId) {
   // A quick pre-check avoids a profile GET for ordinary commands: only fetch
   // the current profile (needed for relative changes like "be terser") when the
   // text already looks like a settings intent given gateway defaults.
@@ -155,34 +163,70 @@ async function maybeApplySettingsChange(tabId, instruction, cfg, signal) {
   const intent = parseSettingsIntent(instruction, current);
   if (!intent) return false;
 
-  await saveTaskState(tabId, { status: "running", instruction, step: 0, lastResult: "applying settings change" });
-  send(tabId, { cmd: "progress", text: "updating settings…" });
+  await saveTaskState(cueId, { status: "running", instruction, step: 0, lastResult: "applying settings change", tabId });
+  send(tabId, { cmd: "progress", cueId, text: "updating settings…" });
   throwIfAborted(signal);
 
-  await putGatewayProfile(cfg, intent.patch, signal);
+  await putGatewayProfile(cfg, intent.patch, signal, "agee-extension");
   const summary = `Settings updated — ${intent.summary}. It takes effect on the next turn.`;
-  send(tabId, { cmd: "done", summary });
-  await saveTaskState(tabId, { status: "done", instruction, step: 1, lastResult: summary.slice(0, 400) });
+  send(tabId, { cmd: "done", cueId, summary });
+  await saveTaskState(cueId, { status: "done", instruction, step: 1, lastResult: summary.slice(0, 400), tabId });
   return true;
 }
 
-// Stable per-tab session id so the gateway can keep conversation continuity.
-const tabSessions = new Map();
-function sessionIdFor(tabId) {
-  let id = tabSessions.get(tabId);
-  if (!id) {
-    id = `agee_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    tabSessions.set(tabId, id);
+// "What prompts have I set?" / "how many system prompts?" → answer from the
+// gateway's prompt-change history instead of running a model turn.
+async function maybeAnswerProfileQuery(tabId, instruction, cfg, signal, cueId) {
+  if (!parseProfileQueryIntent(instruction)) {
+    return false;
   }
-  return id;
+  send(tabId, { cmd: "progress", cueId, text: "checking prompt history…" });
+  throwIfAborted(signal);
+  let data;
+  try {
+    data = await getGatewayProfileHistory(cfg, signal);
+  } catch (error) {
+    send(tabId, { cmd: "error", cueId, text: `Could not read prompt history: ${String(error?.message || error)}` });
+    return true;
+  }
+  const count = Number(data?.system_prompt_changes || 0);
+  const entries = Array.isArray(data?.history) ? data.history : [];
+  const lines = [
+    count === 0
+      ? "You haven't set any system prompts yet."
+      : `You've set ${count} system prompt${count === 1 ? "" : "s"}.`,
+  ];
+  if (data?.current_system_prompt) {
+    lines.push(`Current: "${truncate(data.current_system_prompt, 160)}"`);
+  }
+  entries.slice(0, 5).forEach((entry, i) => {
+    const when = String(entry.ts || "").replace("T", " ").slice(0, 16);
+    lines.push(`${i + 1}. [${when}] ${truncate(entry.system_prompt || "", 120)}`);
+  });
+  const summary = lines.join("\n");
+  send(tabId, { cmd: "done", cueId, summary, speak: lines[0] });
+  await saveTaskState(cueId, { status: "done", instruction, step: 1, lastResult: summary.slice(0, 400), tabId });
+  return true;
+}
+
+function truncate(text, max) {
+  const t = String(text || "");
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+// One session id per cue. Each cue is its own conversation lane on the gateway —
+// this is what lets the user keep cueing ("do X", "now Y", "also Z") and have
+// each routed independently underneath instead of forced into one thread.
+function sessionIdForCue(cueId) {
+  return `agee_${String(cueId || "").replace(/[^a-zA-Z0-9_]/g, "") || Date.now().toString(36)}`;
 }
 
 // Conversational turn through the user's gateway (/v1/voice/turns).
 // The gateway classifies chat vs. home-machine agent runs and replies with
 // display text; we render it. Page-DOM actions are a later wave.
-async function runViaGateway(tabId, instruction, cfg, signal) {
-  await saveTaskState(tabId, { status: "running", instruction, step: 0, lastResult: "sending to gateway" });
-  send(tabId, { cmd: "progress", text: "thinking…" });
+async function runViaGateway(tabId, instruction, cfg, signal, cueId) {
+  await saveTaskState(cueId, { status: "running", instruction, step: 0, lastResult: "sending to gateway", tabId });
+  send(tabId, { cmd: "progress", cueId, text: "thinking…" });
   throwIfAborted(signal);
 
   let screen;
@@ -198,20 +242,25 @@ async function runViaGateway(tabId, instruction, cfg, signal) {
     signal,
     body: {
       source: "agee-extension",
-      session_id: sessionIdFor(tabId),
+      session_id: sessionIdForCue(cueId),
       transcript: instruction,
       screen,
     },
   });
 
   const reply = String(data.display || data.text || data.speak || "").trim();
+  // The gateway returns a separate TTS-safe `speak` string (short, markdown-
+  // stripped). Forward it so the overlay can speak the reply aloud; the gateway
+  // decides when to stay silent by sending an empty speak (e.g. control turns).
+  const speak = String(data.speak || "").trim();
   const runs = Array.isArray(data.agent_runs) ? data.agent_runs : [];
   const summary = reply || (runs.length ? `Started ${runs.length} agent run(s).` : "Done.");
-  send(tabId, { cmd: "done", summary });
-  await saveTaskState(tabId, {
+  send(tabId, { cmd: "done", cueId, summary, speak });
+  await saveTaskState(cueId, {
     status: "done",
     instruction,
     step: 1,
+    tabId,
     lastResult: `[${data.classification || "chat"}] ${summary.slice(0, 400)}`,
   });
 }
@@ -237,14 +286,16 @@ function throwIfAborted(signal) {
   if (signal?.aborted) throw new Error("Task cancelled.");
 }
 
-async function saveTaskState(tabId, patch) {
-  const key = `ageeTask:${tabId}`;
+// Persist per-cue state (keyed by cueId) so concurrent cues don't clobber each
+// other. Falls back to a synthetic key when no id is given.
+async function saveTaskState(id, patch) {
+  const key = `ageeCue:${id || "default"}`;
   const previous = (await chrome.storage.local.get(key))[key] || {};
   await chrome.storage.local.set({
     [key]: {
       ...previous,
       ...patch,
-      tabId,
+      cueId: id,
       updatedAt: new Date().toISOString(),
     },
   });
@@ -382,9 +433,9 @@ function snapToScreen(snap) {
   };
 }
 
-async function describePageViaGateway(tabId, cfg, signal) {
-  await saveTaskState(tabId, { status: "running", instruction: "Describe this page", step: 0, lastResult: "reading page (gateway)" });
-  send(tabId, { cmd: "progress", text: "reading the page…" });
+async function describePageViaGateway(tabId, cfg, signal, cueId) {
+  await saveTaskState(cueId, { status: "running", instruction: "Describe this page", step: 0, lastResult: "reading page (gateway)", tabId });
+  send(tabId, { cmd: "progress", cueId, text: "reading the page…" });
   throwIfAborted(signal);
   const snap = await ask(tabId, { cmd: "snapshot" });
   throwIfAborted(signal);
@@ -399,11 +450,11 @@ async function describePageViaGateway(tabId, cfg, signal) {
     },
   });
   const text = String(data.text || "").trim() || "The gateway returned an empty description.";
-  send(tabId, { cmd: "done", summary: text });
-  await saveTaskState(tabId, { status: "done", instruction: "Describe this page", step: 1, lastResult: text.slice(0, 500) });
+  send(tabId, { cmd: "done", cueId, summary: text });
+  await saveTaskState(cueId, { status: "done", instruction: "Describe this page", step: 1, lastResult: text.slice(0, 500), tabId });
 }
 
-async function describePage(tabId, controller) {
+async function describePage(tabId, controller, cueId) {
   const signal = controller.signal;
 
   try {
@@ -411,17 +462,17 @@ async function describePage(tabId, controller) {
 
     // Prefer the user's own agent gateway (the pipe) when configured.
     if (cfg.gatewayUrl) {
-      await describePageViaGateway(tabId, cfg, signal);
+      await describePageViaGateway(tabId, cfg, signal, cueId);
       return;
     }
 
     if (!cfg.apiKey) {
-      send(tabId, { cmd: "error", text: "No gateway URL and no API key set. Click the agee toolbar icon -> Options to set a gateway URL or add your Anthropic key." });
+      send(tabId, { cmd: "error", cueId, text: "No gateway URL and no API key set. Click the agee toolbar icon -> Options to set a gateway URL or add your Anthropic key." });
       return;
     }
 
-    await saveTaskState(tabId, { status: "running", instruction: "Describe this page", step: 0, lastResult: "reading page" });
-    send(tabId, { cmd: "progress", text: "reading the page…" });
+    await saveTaskState(cueId, { status: "running", instruction: "Describe this page", step: 0, lastResult: "reading page", tabId });
+    send(tabId, { cmd: "progress", cueId, text: "reading the page…" });
     const blocks = await snapshotBlocks(tabId, signal);
     const messages = [
       {
@@ -434,18 +485,18 @@ async function describePage(tabId, controller) {
     ];
     const resp = await callClaude(cfg, messages, signal, { system: DESCRIBE_PROMPT, tools: [] });
     const text = resp.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim() || "I could not describe this page.";
-    send(tabId, { cmd: "done", summary: text });
-    await saveTaskState(tabId, { status: "done", instruction: "Describe this page", step: 1, lastResult: text.slice(0, 500) });
+    send(tabId, { cmd: "done", cueId, summary: text });
+    await saveTaskState(cueId, { status: "done", instruction: "Describe this page", step: 1, lastResult: text.slice(0, 500), tabId });
   } catch (err) {
     const message = signal.aborted ? "Task cancelled." : String(err.message || err);
-    send(tabId, { cmd: signal.aborted ? "done" : "error", summary: message, text: message });
-    await saveTaskState(tabId, { status: signal.aborted ? "cancelled" : "error", instruction: "Describe this page", lastResult: message });
+    send(tabId, { cmd: signal.aborted ? "done" : "error", cueId, summary: message, text: message });
+    await saveTaskState(cueId, { status: signal.aborted ? "cancelled" : "error", instruction: "Describe this page", lastResult: message, tabId });
   } finally {
-    if (tasks.get(tabId) === controller) tasks.delete(tabId);
+    if (tasks.get(cueId)?.controller === controller) tasks.delete(cueId);
   }
 }
 
-async function runAgent(tabId, instruction, controller) {
+async function runAgent(tabId, instruction, controller, cueId) {
   const signal = controller.signal;
 
   try {
@@ -454,40 +505,44 @@ async function runAgent(tabId, instruction, controller) {
     // Prefer the user's own agent gateway (the pipe). Conversational + home-machine
     // agent runs; customize behavior by editing the gateway's SYSTEM_PROMPT.
     if (cfg.gatewayUrl) {
-      // First, see if the user is changing settings by talking to the agent
-      // ("be terser", "set the system prompt to …"). If so, apply it through the
-      // gateway profile endpoints instead of running a conversational turn.
-      if (await maybeApplySettingsChange(tabId, instruction, cfg, signal)) {
+      // First, see if the user is asking *about* their prompt history, then if
+      // they are changing settings by talking to the agent ("be terser", "set
+      // the system prompt to …"). Either is handled through the profile
+      // endpoints instead of running a conversational turn.
+      if (await maybeAnswerProfileQuery(tabId, instruction, cfg, signal, cueId)) {
         return;
       }
-      await runViaGateway(tabId, instruction, cfg, signal);
+      if (await maybeApplySettingsChange(tabId, instruction, cfg, signal, cueId)) {
+        return;
+      }
+      await runViaGateway(tabId, instruction, cfg, signal, cueId);
       return;
     }
 
     if (!cfg.apiKey) {
-      send(tabId, { cmd: "error", text: "No gateway URL and no API key set. Click the agee toolbar icon → Options to set a gateway URL or add your Anthropic key." });
+      send(tabId, { cmd: "error", cueId, text: "No gateway URL and no API key set. Click the agee toolbar icon → Options to set a gateway URL or add your Anthropic key." });
       return;
     }
 
-    await saveTaskState(tabId, { status: "running", instruction, step: 0, lastResult: "started" });
-    send(tabId, { cmd: "progress", text: "thinking…" });
+    await saveTaskState(cueId, { status: "running", instruction, step: 0, lastResult: "started", tabId });
+    send(tabId, { cmd: "progress", cueId, text: "thinking…" });
     const first = await snapshotBlocks(tabId, signal);
     const messages = [
       { role: "user", content: [{ type: "text", text: `TASK: ${instruction}` }, ...first] },
     ];
     for (let step = 0; step < MAX_STEPS; step++) {
-      await saveTaskState(tabId, { status: "running", instruction, step, lastResult: "calling model" });
+      await saveTaskState(cueId, { status: "running", instruction, step, lastResult: "calling model", tabId });
       throwIfAborted(signal);
       const resp = await callClaude(cfg, messages, signal);
       messages.push({ role: "assistant", content: resp.content });
 
       const text = resp.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-      if (text) send(tabId, { cmd: "progress", text });
-      if (text) await saveTaskState(tabId, { status: "running", instruction, step, lastResult: text.slice(0, 500) });
+      if (text) send(tabId, { cmd: "progress", cueId, text });
+      if (text) await saveTaskState(cueId, { status: "running", instruction, step, lastResult: text.slice(0, 500), tabId });
 
       if (resp.stop_reason !== "tool_use") {
-        send(tabId, { cmd: "done", summary: text || "Stopped." });
-        await saveTaskState(tabId, { status: "done", instruction, step, lastResult: text || "Stopped." });
+        send(tabId, { cmd: "done", cueId, summary: text || "Stopped." });
+        await saveTaskState(cueId, { status: "done", instruction, step, lastResult: text || "Stopped.", tabId });
         return;
       }
 
@@ -496,13 +551,13 @@ async function runAgent(tabId, instruction, controller) {
       for (const block of resp.content) {
         if (block.type !== "tool_use") continue;
         if (block.name === "finish") {
-          send(tabId, { cmd: "done", summary: block.input.summary || "Done." });
-          await saveTaskState(tabId, { status: "done", instruction, step, lastResult: block.input.summary || "Done." });
+          send(tabId, { cmd: "done", cueId, summary: block.input.summary || "Done." });
+          await saveTaskState(cueId, { status: "done", instruction, step, lastResult: block.input.summary || "Done.", tabId });
           finished = true;
           break;
         }
         const result = await executeAction(tabId, block.input, signal);
-        await saveTaskState(tabId, { status: "running", instruction, step, lastResult: result });
+        await saveTaskState(cueId, { status: "running", instruction, step, lastResult: result, tabId });
         const snap = await snapshotBlocks(tabId, signal);
         toolResults.push({
           type: "tool_result",
@@ -513,41 +568,57 @@ async function runAgent(tabId, instruction, controller) {
       if (finished) return;
       messages.push({ role: "user", content: toolResults });
     }
-    send(tabId, { cmd: "done", summary: `Reached the ${MAX_STEPS}-step limit.` });
-    await saveTaskState(tabId, { status: "done", instruction, step: MAX_STEPS, lastResult: `Reached the ${MAX_STEPS}-step limit.` });
+    send(tabId, { cmd: "done", cueId, summary: `Reached the ${MAX_STEPS}-step limit.` });
+    await saveTaskState(cueId, { status: "done", instruction, step: MAX_STEPS, lastResult: `Reached the ${MAX_STEPS}-step limit.`, tabId });
   } catch (err) {
     const message = signal.aborted ? "Task cancelled." : String(err.message || err);
-    send(tabId, { cmd: signal.aborted ? "done" : "error", summary: message, text: message });
-    await saveTaskState(tabId, { status: signal.aborted ? "cancelled" : "error", instruction, lastResult: message });
+    send(tabId, { cmd: signal.aborted ? "done" : "error", cueId, summary: message, text: message });
+    await saveTaskState(cueId, { status: signal.aborted ? "cancelled" : "error", instruction, lastResult: message, tabId });
   } finally {
-    if (tasks.get(tabId) === controller) tasks.delete(tabId);
+    if (tasks.get(cueId)?.controller === controller) tasks.delete(cueId);
+  }
+}
+
+// Generate a cueId server-side if the content script didn't supply one, so old
+// callers still work. Each cue is independent — we never reject a new one.
+function nextCueId(provided) {
+  if (typeof provided === "string" && provided) return provided;
+  return `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+}
+
+// Cancel every running cue on a tab (Stop button with no specific cue).
+function cancelTabCues(tabId) {
+  for (const [cueId, task] of tasks) {
+    if (task.tabId === tabId) {
+      task.controller.abort();
+      tasks.delete(cueId);
+    }
   }
 }
 
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (msg.cmd === "run" && sender.tab) {
     const tabId = sender.tab.id;
-    if (tasks.has(tabId)) {
-      send(tabId, { cmd: "error", text: "A task is already running. Stop it before starting another." });
-      return;
-    }
+    const cueId = nextCueId(msg.cueId);
     const controller = new AbortController();
-    tasks.set(tabId, controller);
-    runAgent(tabId, msg.instruction, controller);
+    tasks.set(cueId, { controller, tabId });
+    runAgent(tabId, msg.instruction, controller, cueId);
   }
   if (msg.cmd === "describe" && sender.tab) {
     const tabId = sender.tab.id;
-    if (tasks.has(tabId)) {
-      send(tabId, { cmd: "error", text: "A task is already running. Stop it before starting another." });
-      return;
-    }
+    const cueId = nextCueId(msg.cueId);
     const controller = new AbortController();
-    tasks.set(tabId, controller);
-    describePage(tabId, controller);
+    tasks.set(cueId, { controller, tabId });
+    describePage(tabId, controller, cueId);
   }
   if (msg.cmd === "cancel" && sender.tab) {
-    const controller = tasks.get(sender.tab.id);
-    if (controller) controller.abort();
+    const tabId = sender.tab.id;
+    if (msg.cueId && tasks.has(msg.cueId)) {
+      tasks.get(msg.cueId).controller.abort();
+      tasks.delete(msg.cueId);
+    } else {
+      cancelTabCues(tabId);
+    }
   }
 });
 

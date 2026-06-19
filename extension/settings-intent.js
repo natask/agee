@@ -137,6 +137,23 @@ function hasUsableFields(patch) {
   return Boolean(patch) && Object.keys(patch).some((key) => PROFILE_FIELDS.includes(key));
 }
 
+// Detect a *question about* the agent's prompt history (not a change):
+// "what prompts have I set?", "how many system prompts have I asked you?",
+// "show my prompt history", "what changes have I made to your prompt?".
+// Returns { kind: "prompt_history" } or null. Kept here so the natural-language
+// surface for the agent profile stays in one file.
+function parseProfileQueryIntent(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const mentionsPrompt = /\bprompts?\b/i.test(raw);
+  const asksHistory =
+    /\bprompt\s+history\b/i.test(raw) ||
+    (mentionsPrompt && /\bhow many\b/i.test(raw)) ||
+    (mentionsPrompt && /\b(list|show|what(?:'s| is| are)?)\b/i.test(raw) && /\b(set|asked|made|given|history|so far|have i)\b/i.test(raw)) ||
+    (/\bwhat\b/i.test(raw) && /\bchanges?\b/i.test(raw) && /\b(prompt|system|behaviou?r)\b/i.test(raw));
+  return asksHistory ? { kind: "prompt_history" } : null;
+}
+
 function numberOr(value, fallback) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -148,4 +165,4 @@ function stripQuotes(value) {
   return (quoted ? quoted[1] : trimmed).trim();
 }
 
-export { parseSettingsIntent, PROFILE_FIELDS };
+export { parseSettingsIntent, parseProfileQueryIntent, PROFILE_FIELDS };

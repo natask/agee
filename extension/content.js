@@ -15,9 +15,20 @@
     open = false,
     recognition = null,
     listening = false,
-    running = false,
     dragState = null,
     suppressLauncherClick = false;
+
+  // Many cues can be in flight at once: the user keeps talking, each utterance is
+  // its own lane with its own card in the log. cues maps cueId -> { statusEl };
+  // activeCues tracks which are still running so the launcher dot reflects "busy"
+  // without ever blocking a new cue.
+  let cueSeq = 0;
+  const cues = new Map();
+  const activeCues = new Set();
+  // Replies are spoken one after another (parallel cues finishing together must
+  // not talk over each other).
+  const speechQueue = [];
+  let speaking = false;
 
   function build() {
     root = document.createElement("div");
@@ -50,7 +61,7 @@
         suppressLauncherClick = false;
         return;
       }
-      if (!open && !running && !log?.childElementCount) {
+      if (!open && !anyActive() && !log?.childElementCount) {
         describePage();
       } else {
         toggle(true);
@@ -77,6 +88,7 @@
       e.preventDefault();
       e.stopPropagation();
       chrome.runtime.sendMessage({ cmd: "cancel" });
+      stopSpeaking();
       addLog("agee", "stopping…");
     });
   }
@@ -186,42 +198,126 @@
     });
   }
 
-  function setStatus(state) {
-    const dot = root && root.querySelector("#agee-dot");
-    if (dot) dot.className = state; // "", "running", "done", "error"
-    running = state === "running";
-    if (stopButton) stopButton.classList.toggle("visible", running);
+  let lastTerminal = ""; // "done" | "error" — shown on the dot when nothing is running
+
+  function anyActive() {
+    return activeCues.size > 0;
   }
 
-  function submitInstruction(instruction, displayText = instruction) {
-    if (!instruction) return;
-    if (running) {
-      addLog("error", "A task is already running. Stop it before starting another.");
+  // The launcher dot is "running" while any cue is in flight, otherwise it shows
+  // the most recent terminal state. The Stop button is visible only while busy.
+  function refreshStatus() {
+    const dot = root && root.querySelector("#agee-dot");
+    if (dot) dot.className = anyActive() ? "running" : lastTerminal;
+    if (stopButton) stopButton.classList.toggle("visible", anyActive());
+  }
+
+  // ---- Cue cards --------------------------------------------------------
+  // Each cue gets a card: the user's line plus a live status line that moves
+  // from "thinking…" through progress to a final answer/error.
+  function newCueId() {
+    cueSeq += 1;
+    return `c_${cueSeq}_${Date.now().toString(36)}`;
+  }
+
+  function createCue(cueId, label) {
+    if (!log) return;
+    const card = document.createElement("div");
+    card.className = "agee-cue agee-cue-running";
+    card.dataset.cue = cueId;
+    const you = document.createElement("div");
+    you.className = "agee-row agee-you";
+    you.textContent = label;
+    const status = document.createElement("div");
+    status.className = "agee-cue-status";
+    status.textContent = "thinking…";
+    card.appendChild(you);
+    card.appendChild(status);
+    log.appendChild(card);
+    log.scrollTop = log.scrollHeight;
+    cues.set(cueId, { statusEl: status, cardEl: card });
+    activeCues.add(cueId);
+    refreshStatus();
+  }
+
+  // Update a cue's status line. kind: "running" | "done" | "error".
+  function updateCue(cueId, text, kind) {
+    const entry = cues.get(cueId);
+    // A message for an unknown cue (e.g. server-generated id) falls back to a row.
+    if (!entry) {
+      addLog(kind === "error" ? "error" : "agee", text);
+      if (kind === "done" || kind === "error") {
+        lastTerminal = kind;
+        refreshStatus();
+      }
       return;
     }
-    running = true;
-    setStatus("running");
+    if (typeof text === "string" && text) entry.statusEl.textContent = text;
+    if (kind === "done" || kind === "error") {
+      entry.cardEl.className = `agee-cue agee-cue-${kind}`;
+      activeCues.delete(cueId);
+      lastTerminal = kind;
+    }
+    refreshStatus();
+    if (log) log.scrollTop = log.scrollHeight;
+  }
+
+  // Speak replies one at a time so parallel cues finishing together don't overlap.
+  function speak(text) {
+    const t = String(text || "").trim();
+    if (!t) return;
+    speechQueue.push(t);
+    drainSpeech();
+  }
+
+  function drainSpeech() {
+    if (speaking) return;
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    const next = speechQueue.shift();
+    if (!next) return;
+    speaking = true;
+    try {
+      const utterance = new SpeechSynthesisUtterance(next);
+      utterance.lang = navigator.language || "en-US";
+      utterance.onend = utterance.onerror = () => {
+        speaking = false;
+        drainSpeech();
+      };
+      synth.speak(utterance);
+    } catch {
+      speaking = false;
+    }
+  }
+
+  function stopSpeaking() {
+    speechQueue.length = 0;
+    speaking = false;
+    try {
+      window.speechSynthesis && window.speechSynthesis.cancel();
+    } catch {}
+  }
+
+  // Fire a cue. Never blocks on a prior cue — that is the whole point: the user
+  // keeps talking, each utterance becomes its own concurrent lane.
+  function submitInstruction(instruction, displayText = instruction) {
+    if (!instruction) return;
+    const cueId = newCueId();
     toggle(true);
-    addLog("you", displayText);
+    createCue(cueId, displayText);
     input.value = "";
-    chrome.runtime.sendMessage({ cmd: "run", instruction }).catch((error) => {
-      setStatus("error");
-      addLog("error", String(error?.message || error));
+    input.focus(); // immediately ready for the next cue
+    chrome.runtime.sendMessage({ cmd: "run", instruction, cueId }).catch((error) => {
+      updateCue(cueId, String(error?.message || error), "error");
     });
   }
 
   function describePage() {
-    if (running) {
-      addLog("error", "A task is already running. Stop it before starting another.");
-      return;
-    }
-    running = true;
-    setStatus("running");
+    const cueId = newCueId();
     toggle(true);
-    addLog("you", "Describe this page");
-    chrome.runtime.sendMessage({ cmd: "describe" }).catch((error) => {
-      setStatus("error");
-      addLog("error", String(error?.message || error));
+    createCue(cueId, "Describe this page");
+    chrome.runtime.sendMessage({ cmd: "describe", cueId }).catch((error) => {
+      updateCue(cueId, String(error?.message || error), "error");
     });
   }
 
@@ -476,17 +572,15 @@
         askInlineConfirm(msg.text || "Allow agee to continue?").then((ok) => reply({ ok }));
         return true;
       case "progress":
-        setStatus("running");
         if (!open) toggle(true);
-        addLog("agee", msg.text);
+        updateCue(msg.cueId, msg.text, "running");
         return false;
       case "done":
-        setStatus("done");
-        addLog("done", msg.summary);
+        updateCue(msg.cueId, msg.summary, "done");
+        speak(msg.speak);
         return false;
       case "error":
-        setStatus("error");
-        addLog("error", msg.text);
+        updateCue(msg.cueId, msg.text, "error");
         return false;
     }
   });

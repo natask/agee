@@ -146,6 +146,58 @@
 .agee-error {
   color: #ff6b61;
 }
+/* Cue cards: one per utterance, so several can run at once side by side in the
+   log. A left accent bar carries the state; a pulsing dot marks "running". */
+.agee-cue {
+  margin: 8px 12px;
+  padding: 9px 12px;
+  border-left: 2px solid #555;
+  background: #121215;
+  border-radius: 8px;
+}
+.agee-cue + .agee-cue {
+  margin-top: 6px;
+}
+.agee-cue .agee-you {
+  padding: 0 0 5px 0;
+  font-weight: 600;
+}
+.agee-cue-status {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #cfcfd4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agee-cue-running {
+  border-left-color: #f5a623;
+}
+.agee-cue-running .agee-cue-status {
+  color: #c7b083;
+}
+.agee-cue-running .agee-cue-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: #f5a623;
+  vertical-align: middle;
+  animation: agee-pulse 1s infinite;
+}
+.agee-cue-done {
+  border-left-color: #35c759;
+}
+.agee-cue-done .agee-cue-status {
+  color: #e7e7ea;
+}
+.agee-cue-error {
+  border-left-color: #ff453a;
+}
+.agee-cue-error .agee-cue-status {
+  color: #ff8278;
+}
 .agee-confirm {
   color: #f2f2f2;
   border-top: 1px solid #1d1d20;
