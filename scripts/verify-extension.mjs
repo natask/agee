@@ -7,6 +7,7 @@ const requiredFiles = [
   "extension/content.js",
   "extension/options.html",
   "extension/options.js",
+  "extension/settings-intent.js",
   "extension/overlay.css",
   "extension/dev.html",
   "extension/dev.js",
@@ -18,6 +19,9 @@ const requiredFiles = [
   "LICENSE",
   "scripts/smoke-extension.mjs",
   "scripts/dev-extension.mjs",
+  "scripts/chrome-for-testing.mjs",
+  "scripts/smoke-gateway.mjs",
+  "scripts/smoke-settings.mjs",
 ];
 
 for (const file of requiredFiles) {
@@ -41,7 +45,18 @@ if (!manifest.commands?.["toggle-agee"]) {
   throw new Error("missing toggle-agee command");
 }
 
-for (const file of ["extension/background.js", "extension/content.js", "extension/options.js", "extension/dev.js", "scripts/dev-extension.mjs"]) {
+for (const file of [
+  "extension/background.js",
+  "extension/content.js",
+  "extension/options.js",
+  "extension/settings-intent.js",
+  "extension/dev.js",
+  "scripts/dev-extension.mjs",
+  "scripts/smoke-extension.mjs",
+  "scripts/smoke-gateway.mjs",
+  "scripts/smoke-settings.mjs",
+  "scripts/chrome-for-testing.mjs",
+]) {
   execFileSync(process.execPath, ["--check", file], { stdio: "inherit" });
 }
 

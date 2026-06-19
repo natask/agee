@@ -1,21 +1,30 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { resolve, join } from "node:path";
+// Quiet headless smoke for the REAL agee extension.
+//
+// Launches Chrome for Testing with --headless=new and a throwaway profile under
+// .gstack/background-qa/<run>/, loads the unpacked extension/, and drives the
+// real background service worker -> content script message path against the demo
+// page. No visible window, no focus steal, no prompts, never the daily profile.
+//
+// Branded Google Chrome hard-blocks --load-extension. If the resolved binary
+// ever refuses it we fail loudly instead of silently falling back to a
+// content-script harness — the whole point is to exercise the real extension.
 
-const chromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { join, resolve } from "node:path";
+import { resolveChromeForTesting, quietChromeArgs } from "./chrome-for-testing.mjs";
+
 const root = resolve(new URL("..", import.meta.url).pathname);
 const extensionPath = join(root, "extension");
-const profilePath = join(tmpdir(), `agee-chrome-${Date.now()}`);
+const runId = new Date().toISOString().replace(/[:.]/g, "-");
+const runDir = join(root, ".gstack", "background-qa", `smoke-${runId}`);
+const profilePath = join(runDir, "chrome-profile");
+const artifactsDir = join(runDir, "artifacts");
 let latestChromeStderr = "";
 
-if (!existsSync(chromePath)) {
-  throw new Error(`Chrome not found at ${chromePath}`);
-}
-
 function serve() {
-  const server = createServer(async (req, res) => {
+  const server = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
     const path = url.pathname === "/" ? "/fixtures/demo.html" : url.pathname;
     const file = join(root, path.replace(/^\/+/, ""));
@@ -40,7 +49,7 @@ function delay(ms) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
-async function waitForFile(path, timeoutMs = 10000) {
+async function waitForFile(path, timeoutMs = 15000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (existsSync(path)) return readFileSync(path, "utf8");
@@ -86,7 +95,7 @@ async function targets(port) {
   return fetch(`http://127.0.0.1:${port}/json/list`).then((resp) => resp.json());
 }
 
-async function waitForTarget(port, predicate, timeoutMs = 10000) {
+async function waitForTarget(port, predicate, timeoutMs = 15000) {
   const started = Date.now();
   let lastTargets = [];
   while (Date.now() - started < timeoutMs) {
@@ -114,91 +123,58 @@ async function evaluate(cdp, expression) {
   return result.result.value;
 }
 
-async function injectContentHarness(cdp) {
-  const css = readFileSync(join(root, "extension/overlay.css"), "utf8");
-  const content = readFileSync(join(root, "extension/content.js"), "utf8");
-  await evaluate(cdp, `
-    window.__ageeMessages = [];
-    window.chrome = {
-      runtime: {
-        sendMessage(message) {
-          window.__ageeMessages.push(message);
-          return Promise.resolve({ ok: true });
-        },
-        onMessage: {
-          addListener(listener) {
-            window.__ageeListener = listener;
-          }
-        }
-      },
-      storage: {
-        local: {
-          get(defaults, callback) {
-            callback(defaults || {});
-          },
-          set() {}
-        }
-      }
-    };
-    const style = document.createElement("style");
-    style.textContent = ${JSON.stringify(css)};
-    document.documentElement.appendChild(style);
-    true;
-  `);
-  await cdp.send("Runtime.evaluate", {
-    expression: `${content}\n//# sourceURL=agee-content.js`,
-    awaitPromise: true,
-    returnByValue: true,
-  });
-  await evaluate(cdp, `
-    window.__ageeSend = (message) => new Promise((resolve) => {
-      window.__ageeListener(message, {}, resolve);
-    });
-    true;
-  `);
-}
-
-async function waitForEval(cdp, expression, timeoutMs = 10000) {
+async function waitForEval(cdp, expression, timeoutMs = 12000) {
   const started = Date.now();
   let lastValue;
   while (Date.now() - started < timeoutMs) {
-    lastValue = await evaluate(cdp, expression);
-    if (lastValue) return true;
-    await delay(100);
+    lastValue = await evaluate(cdp, expression).catch(() => undefined);
+    if (lastValue) return lastValue;
+    await delay(150);
   }
-  const href = await evaluate(cdp, "location.href").catch(() => "(unknown)");
-  const readyState = await evaluate(cdp, "document.readyState").catch(() => "(unknown)");
-  throw new Error(`Timed out waiting for expression: ${expression}; last=${JSON.stringify(lastValue)} href=${href} readyState=${readyState}`);
+  throw new Error(`Timed out waiting for expression: ${expression}; last=${JSON.stringify(lastValue)}`);
 }
 
 async function main() {
+  const chromePath = resolveChromeForTesting();
   const { server, port: serverPort } = await serve();
   mkdirSync(profilePath, { recursive: true });
+  mkdirSync(artifactsDir, { recursive: true });
 
   const demoUrl = `http://localhost:${serverPort}/fixtures/demo.html`;
-  const chrome = spawn(chromePath, [
-    `--user-data-dir=${profilePath}`,
-    `--load-extension=${extensionPath}`,
-    "--remote-debugging-port=0",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-background-networking",
-    "--disable-sync",
-    "--enable-logging=stderr",
-    "--start-minimized",
-    "--window-size=1280,900",
-    "about:blank",
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+  const chrome = spawn(chromePath, quietChromeArgs({ extensionPath, profilePath }), {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   chrome.stderr.on("data", (chunk) => {
     latestChromeStderr += chunk.toString();
     latestChromeStderr = latestChromeStderr.slice(-4000);
   });
 
-  let pageCdp;
+  let browserCdp;
   let workerCdp;
+  let pageCdp;
   try {
     const devToolsPort = Number((await waitForFile(join(profilePath, "DevToolsActivePort"))).split("\n")[0]);
-    const pageTarget = await waitForTarget(devToolsPort, (target) => target.type === "page");
+
+    // The agee service worker target is the proof the REAL extension loaded.
+    const workerTarget = await waitForTarget(
+      devToolsPort,
+      (target) => target.type === "service_worker" && /^chrome-extension:\/\/[a-p]+\/background\.js$/.test(target.url || ""),
+    );
+
+    if (latestChromeStderr.includes("--load-extension is not allowed")) {
+      throw new Error(
+        "The resolved Chrome refused --load-extension (branded Chrome blocks it). " +
+          "Point AGEE_CHROME_PATH at a Chrome for Testing binary.",
+      );
+    }
+
+    const extensionId = workerTarget.url.match(/^chrome-extension:\/\/([a-p]+)\//)[1];
+
+    // Create a page target explicitly: --headless=new does not auto-open one.
+    const browserInfo = await fetch(`http://127.0.0.1:${devToolsPort}/json/version`).then((resp) => resp.json());
+    browserCdp = new Cdp(browserInfo.webSocketDebuggerUrl);
+    const { targetId } = await browserCdp.send("Target.createTarget", { url: "about:blank" });
+    const pageTarget = await waitForTarget(devToolsPort, (target) => target.type === "page" && target.id === targetId);
 
     pageCdp = new Cdp(pageTarget.webSocketDebuggerUrl);
     await pageCdp.send("Runtime.enable");
@@ -206,58 +182,64 @@ async function main() {
     await pageCdp.send("Page.navigate", { url: demoUrl });
     await waitForEval(pageCdp, `location.href.startsWith(${JSON.stringify(demoUrl)}) && document.readyState === "complete"`);
 
-    try {
-      await waitForEval(pageCdp, "Boolean(window.__ageeLoaded)");
-    } catch (error) {
-      if (latestChromeStderr.includes("--load-extension is not allowed")) {
-        await injectContentHarness(pageCdp);
-      } else {
-      const allTargets = await targets(devToolsPort);
-      throw new Error(`${error.message}\nTargets: ${JSON.stringify(allTargets.map((target) => ({
-        type: target.type,
-        title: target.title,
-        url: target.url,
-      })), null, 2)}`);
-      }
-    }
-    await evaluate(pageCdp, `
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true, cancelable: true }));
-      window.dispatchEvent(new KeyboardEvent("keyup", { key: "k", metaKey: true, bubbles: true, cancelable: true }));
-      true;
-    `);
-    const overlayOpen = await evaluate(pageCdp, "Boolean(document.querySelector('#agee-root.agee-open'))");
-    if (!overlayOpen) throw new Error("overlay did not open");
+    // Drive the real background -> content path from the service worker, exactly
+    // as production does (background.js uses chrome.tabs.sendMessage). A reply
+    // proves the real content script auto-injected on the localhost match.
+    workerCdp = new Cdp(workerTarget.webSocketDebuggerUrl);
+    await workerCdp.send("Runtime.enable");
 
-    const workerResult = await evaluate(pageCdp, `
+    const ping = await waitForEval(workerCdp, `
       (async () => {
-        const snapshot = await window.__ageeSend({ cmd: "snapshot" });
-        const inputIndex = snapshot.elements.find((el) => el.tag === "input" && el.label.includes("Type something"));
-        const buttonIndex = snapshot.elements.find((el) => el.tag === "button" && el.label === "Search");
-        if (!inputIndex || !buttonIndex) return { ok: false, error: "expected demo controls missing", snapshot };
-        await window.__ageeSend({ cmd: "act", action: "type", index: inputIndex.i, text: "browser agent" });
-        await window.__ageeSend({ cmd: "act", action: "click", index: buttonIndex.i });
-        return { ok: true, elements: snapshot.elements.length };
-      })();
+        const [tab] = await chrome.tabs.query({ url: "http://localhost/*" });
+        if (!tab) return null;
+        try {
+          const res = await chrome.tabs.sendMessage(tab.id, { cmd: "ping" });
+          return res && res.ok ? { tabId: tab.id } : null;
+        } catch {
+          return null;
+        }
+      })()
     `);
-    if (!workerResult?.ok) throw new Error(workerResult?.error || "worker smoke failed");
+    if (!ping?.tabId) throw new Error("real content script did not answer ping via the service worker");
+
+    const workerResult = await evaluate(workerCdp, `
+      (async () => {
+        const tabId = ${ping.tabId};
+        const snapshot = await chrome.tabs.sendMessage(tabId, { cmd: "snapshot" });
+        const input = snapshot.elements.find((el) => el.tag === "input" && el.label.includes("Type something"));
+        const button = snapshot.elements.find((el) => el.tag === "button" && el.label === "Search");
+        if (!input || !button) return { ok: false, error: "expected demo controls missing", snapshot };
+        await chrome.tabs.sendMessage(tabId, { cmd: "act", action: "type", index: input.i, text: "browser agent" });
+        await chrome.tabs.sendMessage(tabId, { cmd: "act", action: "click", index: button.i });
+        return { ok: true, elements: snapshot.elements.length, url: snapshot.url, title: snapshot.title };
+      })()
+    `);
+    if (!workerResult?.ok) throw new Error(workerResult?.error || "service-worker smoke failed");
 
     const screenshot = await pageCdp.send("Page.captureScreenshot", { format: "jpeg", quality: 40 });
     if (!screenshot?.data) throw new Error("page screenshot capture failed");
+    const screenshotPath = join(artifactsDir, "demo.jpg");
+    writeFileSync(screenshotPath, Buffer.from(screenshot.data, "base64"));
 
     const resultText = await evaluate(pageCdp, "document.querySelector('#results').textContent");
     if (resultText !== "Searched Docs: browser agent") {
       throw new Error(`unexpected demo result: ${resultText}`);
     }
 
-    const mode = latestChromeStderr.includes("--load-extension is not allowed") ? "content harness" : "extension";
-    console.log(`extension smoke passed (${mode}): ${workerResult.elements} elements observed, screenshot captured, action executed`);
+    console.log(
+      `extension smoke passed (REAL extension, headless Chrome for Testing): ` +
+        `service worker loaded id=${extensionId}, ${workerResult.elements} elements observed via background->content, ` +
+        `type+click executed, demo result "${resultText}", no window shown, no focus taken.`,
+    );
+    console.log(`screenshot: ${screenshotPath}`);
   } finally {
     pageCdp?.close();
     workerCdp?.close();
+    browserCdp?.close();
     server.close();
     chrome.kill("SIGTERM");
     await delay(300);
-    rmSync(profilePath, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
   }
 }
 

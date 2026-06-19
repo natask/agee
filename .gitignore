@@ -3,6 +3,17 @@ node_modules/
 .DS_Store
 *.log
 
+# Quiet background QA artifacts: throwaway Chrome profiles, screenshots, logs.
+.gstack/
+
 # Local-only: raw thinking and agent context, never published
 __LOG__.md
 .context/
+
+# Local secrets: the gateway token lives here, never committed. .env.example is tracked.
+.env
+
+# Local agent harness state (not product source)
+.claude/
+.codex/
+.entire/
