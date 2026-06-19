@@ -2,6 +2,8 @@
 // Holds the API key, runs the agent loop, talks to the page via the content script.
 // The model call lives here (not the page) so we control the network boundary.
 
+import { parseSettingsIntent } from "./settings-intent.js";
+
 const API_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MODEL = "claude-opus-4-8";
 const MAX_STEPS = 20;
@@ -88,6 +90,11 @@ async function callGateway(cfg, path, { method = "POST", body, signal } = {}) {
   });
   const text = await resp.text();
   if (!resp.ok) {
+    if (resp.status === 401) {
+      throw new Error(
+        "Gateway rejected the token (401). Open agee Options and set a valid Gateway token, then Save."
+      );
+    }
     throw new Error(`gateway ${resp.status}: ${text.slice(0, 300)}`);
   }
   try {
@@ -99,6 +106,64 @@ async function callGateway(cfg, path, { method = "POST", body, signal } = {}) {
 
 async function gatewayHealth(cfg, signal) {
   return callGateway(cfg, "/health", { method: "GET", signal });
+}
+
+// ---- Runtime agent profile (the settings the agent reads/writes) ----------
+// Cache key shared with the options page so a change applied here refreshes an
+// open settings surface live (chrome.storage.onChanged).
+const PROFILE_CACHE_KEY = "ageeProfileCache";
+
+// Read the effective profile from the gateway (GET /v1/agent/profile).
+async function getGatewayProfile(cfg, signal) {
+  return callGateway(cfg, "/v1/agent/profile", { method: "GET", signal });
+}
+
+// Patch + persist a profile change through the gateway (PUT /v1/agent/profile)
+// and cache the authoritative result so the settings surface stays in sync.
+async function putGatewayProfile(cfg, patch, signal) {
+  const payload = await callGateway(cfg, "/v1/agent/profile", {
+    method: "PUT",
+    signal,
+    body: { profile: patch },
+  });
+  await chrome.storage.local.set({ [PROFILE_CACHE_KEY]: payload });
+  return payload;
+}
+
+// "Change settings by talking to the agent": if the instruction is a settings
+// request, turn it into a concrete profile patch and apply it through the
+// gateway profile endpoints, then render a confirmation. Returns true when the
+// instruction was handled as a settings change (so the caller skips the normal
+// conversational turn); false otherwise.
+async function maybeApplySettingsChange(tabId, instruction, cfg, signal) {
+  // A quick pre-check avoids a profile GET for ordinary commands: only fetch
+  // the current profile (needed for relative changes like "be terser") when the
+  // text already looks like a settings intent given gateway defaults.
+  let current = null;
+  if (!parseSettingsIntent(instruction, current)) {
+    return false;
+  }
+  try {
+    const profilePayload = await getGatewayProfile(cfg, signal);
+    current = profilePayload?.profile || null;
+    await chrome.storage.local.set({ [PROFILE_CACHE_KEY]: profilePayload });
+  } catch {
+    // Fall back to defaults-based parsing if the GET fails; the PUT below will
+    // surface any real gateway error loudly.
+  }
+
+  const intent = parseSettingsIntent(instruction, current);
+  if (!intent) return false;
+
+  await saveTaskState(tabId, { status: "running", instruction, step: 0, lastResult: "applying settings change" });
+  send(tabId, { cmd: "progress", text: "updating settings…" });
+  throwIfAborted(signal);
+
+  await putGatewayProfile(cfg, intent.patch, signal);
+  const summary = `Settings updated — ${intent.summary}. It takes effect on the next turn.`;
+  send(tabId, { cmd: "done", summary });
+  await saveTaskState(tabId, { status: "done", instruction, step: 1, lastResult: summary.slice(0, 400) });
+  return true;
 }
 
 // Stable per-tab session id so the gateway can keep conversation continuity.
@@ -389,6 +454,12 @@ async function runAgent(tabId, instruction, controller) {
     // Prefer the user's own agent gateway (the pipe). Conversational + home-machine
     // agent runs; customize behavior by editing the gateway's SYSTEM_PROMPT.
     if (cfg.gatewayUrl) {
+      // First, see if the user is changing settings by talking to the agent
+      // ("be terser", "set the system prompt to …"). If so, apply it through the
+      // gateway profile endpoints instead of running a conversational turn.
+      if (await maybeApplySettingsChange(tabId, instruction, cfg, signal)) {
+        return;
+      }
       await runViaGateway(tabId, instruction, cfg, signal);
       return;
     }

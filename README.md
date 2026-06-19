@@ -18,31 +18,47 @@ MVP - a Chrome (Manifest V3) extension you can load unpacked today.
 
 **Next:** customization from inside the app · userScripts opt-in walkthrough · richer voice mode · cross-navigation task continuity · MOA integration · local-model backend.
 
-## Run it
+## Develop it (quiet by default)
 
-1. `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the [extension/](extension/) folder.
-2. Click the **agee** toolbar icon → paste your Anthropic API key → Save.
-3. For the demo and development loop, run `npm run dev` and open `http://localhost:7777/fixtures/demo.html`. For any other low-risk page, open it normally.
-4. Press **Cmd+K** (Mac) / **Ctrl+K**, type an instruction (e.g. *"search docs for browser agent"*), hit Enter. If Chrome reports a shortcut conflict, set the shortcut at `chrome://extensions/shortcuts`.
-
-## Develop it
-
-Use a separate localhost page and a separate extension page for development:
+Development is **headless and off-screen**. It drives **Chrome for Testing**
+(from the puppeteer cache) with a throwaway profile — never your daily
+Chrome/Brave — so it never opens a window, never steals focus, and never
+prompts. Branded Google Chrome hard-blocks `--load-extension`; Chrome for
+Testing allows it and loads the real agee service worker.
 
 ```sh
 npm run dev
 ```
 
-Then:
+That single command:
 
-1. Load unpacked [extension/](extension/) once in `chrome://extensions`.
-2. Copy the extension id from the agee extension card.
-3. Open `chrome-extension://<extension-id>/dev.html?server=http://localhost:7777`.
-4. Open `http://localhost:7777/fixtures/demo.html` as the page you test against.
+1. Serves the demo page at `http://localhost:7777/fixtures/demo.html`.
+2. Launches a headless Chrome for Testing instance that loads [extension/](extension/) and prints the stable extension id.
+3. Watches [extension/](extension/) and [fixtures/](fixtures/). On every edit it reloads the real extension in the background via `chrome.runtime.reload()` (or, when the headless service worker has gone dormant, by transparently relaunching the headless instance). No window appears either way.
 
-Keep both pages open. When you edit files under [extension/](extension/) or [fixtures/](fixtures/), the dev bridge reloads the extension and localhost demo tabs. The next Cmd/Ctrl+K run uses the latest code.
+Options:
 
-This keeps development on a controlled page instead of your normal tabs. The dev bridge only reloads `localhost` / `127.0.0.1` tabs, so normal browsing is not part of the test loop.
+- `npm run dev -- --port 8080` — change the localhost port.
+- `npm run dev -- --no-browser` — run just the dev server (pair with the manual visible route below).
+
+Prerequisite: Chrome for Testing must be in the puppeteer/playwright cache. If
+it is missing, install it once with `npx @puppeteer/browsers install chrome@stable`,
+or point `AGEE_CHROME_PATH` at a Chrome for Testing binary. Throwaway profiles,
+logs, and screenshots are written under `.gstack/background-qa/` (git-ignored).
+
+## See it (explicit, opt-in only)
+
+The default loop above is intentionally invisible. When you actually want to
+*watch* the extension on screen, this manual route is the only one to use — it
+is separate from the quiet flow on purpose:
+
+1. Open `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the [extension/](extension/) folder.
+2. Click the **agee** toolbar icon → paste your Anthropic API key (or set the gateway URL) → Save.
+3. Run `npm run dev -- --no-browser` and open `http://localhost:7777/fixtures/demo.html`. For any other low-risk page, open it normally.
+4. Press **Cmd+K** (Mac) / **Ctrl+K**, type an instruction (e.g. *"search docs for browser agent"*), hit Enter. If Chrome reports a shortcut conflict, set the shortcut at `chrome://extensions/shortcuts`.
+
+Optionally open `chrome-extension://<extension-id>/dev.html?server=http://localhost:7777`
+in that browser to get the in-page reload bridge for this manual session.
 
 ## Verify it
 
@@ -53,9 +69,58 @@ npm run verify
 npm run smoke
 ```
 
-`verify` checks that the MV3 manifest parses, required files exist, required permissions/commands are present, and extension JavaScript has valid syntax.
+`verify` checks that the MV3 manifest parses, required files exist, required
+permissions/commands are present, and the extension/harness JavaScript has valid
+syntax.
 
-`smoke` launches Chrome, opens the demo page, confirms the overlay loads, snapshots page affordances, executes type/click actions, and captures a screenshot. If local Chrome policy refuses `--load-extension`, the script falls back to injecting the same content script into the browser page as a harness and says so in the output.
+`smoke` launches headless Chrome for Testing with a throwaway profile, loads the
+real [extension/](extension/), and confirms the agee background **service worker**
+loads with a stable id. It then drives the real background → content-script
+message path (`snapshot`, `type`, `click`) against the demo page and captures a
+screenshot — no window shown, no focus taken. It exercises the **real** extension;
+if the resolved Chrome ever refuses `--load-extension`, smoke fails loudly rather
+than falling back to a content-script harness.
+
+## Verify the gateway round-trip
+
+The overlay does not talk to the model vendor directly when a gateway is
+configured — it talks to **your** agent gateway. `smoke:gateway` proves that path
+end to end, headless and off-screen (same quiet rules as `smoke`):
+
+```sh
+npm run smoke:gateway                        # health + loud-error legs
+AGEE_GATEWAY_TOKEN=<token> npm run smoke:gateway   # + authenticated legs
+```
+
+It loads the real extension, writes the gateway URL + token into
+`chrome.storage.local` (exactly as the Options page does), opens the overlay, and
+drives real `run` / `describe` submits while a `fetch` recorder in the service
+worker observes which gateway path produced each rendered reply. The default
+gateway is the live one (`http://10.147.17.10:8788`); override with
+`AGEE_GATEWAY_URL`.
+
+**Confirmed round-trip sequence (what the smoke asserts):**
+
+1. **Health** — with the URL configured, `GET /health` returns `200 {ok:true}`
+   (no token needed). This is the reachability gate.
+2. **Command** — a command submitted in the overlay is sent as `run` →
+   `background.js` `POST /v1/voice/turns` (with `Authorization: Bearer <token>`)
+   → the gateway's `display`/`text` reply renders as a **done** row in the
+   overlay. The recorder confirms the reply originated from `/v1/voice/turns`.
+3. **Describe** — "describe page" is sent as `describe` → `POST /v1/chat` → the
+   gateway's `text` renders as a **done** row. The recorder confirms it
+   originated from `/v1/chat`.
+4. **Loud failure** — pointed at the gateway with **no/invalid token**, the same
+   command hits `POST /v1/voice/turns`, the gateway returns `401`, and the
+   overlay renders a clear **error** row ("Gateway rejected the token (401).
+   Open agee Options and set a valid Gateway token, then Save.") with a red
+   status dot. The failure is visible, never silent.
+
+The bearer token is read **only** from `AGEE_GATEWAY_TOKEN` at run time (never
+from a file, never printed — see [.env.example](.env.example)). Without it, legs
+1–2 above are skipped (implemented, awaiting the token) while the **health** and
+**loud-error** legs always run; the smoke does not fail just because the token is
+absent.
 
 ## How it fits together
 
@@ -63,7 +128,8 @@ npm run smoke
 - [extension/content.js](extension/content.js) — the Cmd+K overlay, page perception, and action execution (the only part touching the DOM).
 - [extension/background.js](extension/background.js) — holds the key, runs the agent loop, calls the model, captures screenshots.
 - [extension/options.html](extension/options.html) / [options.js](extension/options.js) — key + model settings.
-- [extension/dev.html](extension/dev.html) / [dev.js](extension/dev.js) — local reload bridge for extension development.
+- [extension/dev.html](extension/dev.html) / [dev.js](extension/dev.js) — in-page reload bridge for the manual visible dev session.
+- [scripts/chrome-for-testing.mjs](scripts/chrome-for-testing.mjs) — resolves the headless Chrome for Testing binary and the quiet launch flags shared by the dev loop and smoke.
 
 The model call lives in the background service worker, not the page, so the network boundary stays in one place.
 
@@ -73,6 +139,7 @@ The model call lives in the background service worker, not the page, so the netw
 - [docs/task-split.md](docs/task-split.md) — workstreams, delegated research, and next delegation candidates.
 - [docs/research.md](docs/research.md) — prior art and build-vs-borrow decision.
 - [docs/architecture.md](docs/architecture.md) — runtime boundaries, message contract, agent loop, and security rules.
+- [docs/chrome-agent-surface.md](docs/chrome-agent-surface.md) — Chrome global command, desktop capture, and browser-based Moa decision note.
 - [docs/customization.md](docs/customization.md) — customization and future userScripts path.
 - [docs/validation.md](docs/validation.md) — demo script and validation questions.
 - [LICENSE](LICENSE) — MIT license for the open-source promise.
