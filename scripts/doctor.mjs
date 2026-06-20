@@ -131,10 +131,12 @@ async function checkGateway(config) {
       body: JSON.stringify({
         session_id: `agee-doctor-${Date.now()}`,
         turn_id: `turn-${Date.now()}`,
-        transcript: "test",
+        forced_action: "agent_run",
+        harness: "echo",
+        transcript: "agee doctor gateway-token check",
         screen_context: {
           surface: "agee-doctor",
-          text: "local extension operational doctor",
+          text: "local extension operational doctor; use deterministic echo harness",
         },
       }),
     });
