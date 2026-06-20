@@ -1,21 +1,29 @@
 # Customization Path
 
-Agee should be customizable from inside the application, but executable extension behavior should not be silently updated from a website.
+Agee should be customizable from inside the application, but the extension
+package is a stable thin client. User-specific customization is served by the
+engine as data, not by silently updating executable extension behavior from a
+website.
 
 ## What Can Update From The App
 
-These can be changed safely because they are declarative user settings:
+These can be changed safely because they are declarative user settings or
+engine-served UI spec:
 
 - Overlay placement.
 - Overlay size and density.
 - Theme.
 - Default input mode.
-- Prompt templates.
+- Runtime profile fields and prompt templates stored on the gateway.
 - Per-site enablement.
 - Declarative tweaks such as hide element, rename label, prefill text, or open URL.
 - Workflow definitions that compile to the existing constrained action DSL.
+- Extension UI structure represented as a declarative spec interpreted by the
+  stable renderer.
 
-These settings should live in `chrome.storage.local` for local-only use, with a later sync path only after the user chooses to save or claim their work.
+Gateway URL/token live in `chrome.storage.local`. Customization state should
+live on the configured engine so the same packaged extension works against a
+self-hosted or hosted gateway.
 
 ## What Should Not Update From The App
 
@@ -27,11 +35,12 @@ These should not come from a remote website:
 - Permission changes.
 - Code that can read secrets, cookies, or page credentials.
 
-If the extension needs new executable behavior, ship a new extension version or require an explicit user-controlled script permission path.
+If the extension needs new executable behavior, ship a new extension version or require an explicit user-controlled script permission path. Do not create an end-user "reload the unpacked extension" deployment path; disk reload is a developer convenience only.
 
 ## UserScripts Later
 
-UserScripts are the right escape hatch for advanced per-site customization, but not the first default.
+UserScripts are the right escape hatch for advanced per-site customization, but
+not the first default. The default path is engine-served declarative UI spec.
 
 The future walkthrough should be concrete:
 
@@ -65,10 +74,14 @@ This keeps the first experience focused on creation instead of authentication.
 
 ## Dev Loop
 
-Customization work should use the same isolated development path:
+Extension development should use the same isolated development path:
 
 - `npm run dev` serves the demo page.
 - `extension/dev.html` polls the dev server.
 - Changes under `extension/` reload the unpacked extension.
 - Changes under `fixtures/` reload the localhost demo page.
 - Normal browsing tabs are not touched.
+
+This loop is for development only. User customization must travel through the
+engine-served spec/sandbox/userScripts paths above, not by promoting local disk
+reload to an end-user feature.

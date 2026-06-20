@@ -5,7 +5,9 @@ Agee starts as a Chrome Manifest V3 extension because the browser is the smalles
 ## Goals
 
 - User-owned and open source.
-- Bring your own model key.
+- Thin client for a self-hosted or hosted agent gateway.
+- Provider keys, subscriptions, model routing, and durable state live on the
+  gateway, not in the browser.
 - Browser-native interface first, with a path to desktop/Moa/local runtimes later.
 - No sidebar as the primary surface.
 - Keep extension development on a dedicated dev bridge page and localhost demo page.
@@ -54,14 +56,16 @@ File:
 
 Responsibilities:
 
-- Store the model orchestration loop.
-- Read settings from `chrome.storage.local`.
+- Read gateway connection settings from `chrome.storage.local`.
 - Capture visible-tab screenshots.
-- Call the model provider.
-- Validate and translate model tool calls into content-script actions.
+- Route commands, describe requests, profile updates, and agent work to the
+  configured gateway.
+- Validate and translate gateway-proposed actions into content-script actions.
 - Handle the extension keyboard command.
 
-The background worker is the only component that sees the API key and calls the model endpoint.
+The background worker does not hold provider API keys and does not call model
+vendors directly. It holds only the engine URL/session token needed to reach the
+gateway.
 
 ### Options Page
 
@@ -72,9 +76,10 @@ Files:
 
 Responsibilities:
 
-- Save the user's API key locally.
-- Save the model ID.
-- Explain that keys are stored in the local browser profile.
+- Save the user's gateway URL/token locally.
+- Read and write gateway-owned runtime profile fields such as system prompt,
+  model selection, temperature, language, and voice settings.
+- Explain that provider credentials live on the gateway, not in the browser.
 
 ### Dev Bridge
 
@@ -93,6 +98,8 @@ Responsibilities:
 - Keep normal browsing outside the development loop.
 
 The dev bridge is an extension page, not a content script. It has access to extension APIs and can reload the extension, while the demo page stays a disposable target for testing page UI and actions.
+It is a developer-only convenience for unpacked-extension work, not a user-facing
+promotion, deployment, or customization path.
 
 ## Message Contract
 
@@ -146,9 +153,9 @@ Next hardening step:
 3. Content script sends `{ cmd: "run", instruction }`.
 4. Background asks content script for a fresh snapshot.
 5. Background captures a visible-tab screenshot.
-6. Background sends instruction, DOM affordances, and screenshot to the model.
-7. Model must use either `act` or `finish`.
-8. Background validates the action and executes it through the content script or tab API.
+6. Background sends instruction, DOM affordances, and screenshot to the gateway.
+7. The gateway/model returns an answer, run status, or action proposal.
+8. Background validates any proposed action and executes it through the content script or tab API.
 9. Background waits briefly, refreshes snapshot/screenshot, and continues.
 10. Loop ends when the model calls `finish`, errors, or hits the step limit.
 
@@ -159,7 +166,8 @@ This loop is experimental capability. The product frame remains a browser-native
 - Never execute model-generated JavaScript.
 - Never inject remote code.
 - Do not update executable extension behavior from a website.
-- Keep the API key out of the content script.
+- Keep provider API keys and subscriptions out of the extension entirely.
+- Route model/API-backed actions through the configured gateway.
 - Capture screenshots only after user invocation.
 - Restrict model actions to the explicit action DSL.
 - Block non-HTTP(S) navigation.
@@ -193,10 +201,12 @@ If userScripts are added later, they should be an explicit opt-in path with a wa
 - Extension JavaScript passes syntax checks.
 - Cmd/Ctrl+K works through the Manifest `commands` entry point.
 - Localhost demo content-script path works for automated smoke tests.
-- Dev bridge reloads the unpacked extension when `extension/` files change.
+- Developer-only dev bridge reloads the unpacked extension when `extension/`
+  files change.
 - Dev bridge touches only localhost / 127.0.0.1 test tabs.
-- Options page stores and reloads key/model settings.
+- Options page stores and reloads gateway URL/token settings.
+- Runtime profile settings read/write through gateway endpoints.
 - Screenshot capture path lives in the background worker.
-- Model call uses a constrained tool schema.
+- Gateway-routed action proposals use a constrained action schema.
 - Content script can snapshot visible affordances.
 - Content script can click/type/scroll/select without arbitrary code execution.

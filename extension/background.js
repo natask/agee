@@ -52,7 +52,7 @@ const ALLOWED_NAVIGATION_PROTOCOLS = new Set(["http:", "https:"]);
 const tasks = new Map();
 
 async function getConfig() {
-  const { ageeGatewayUrl, ageeGatewayToken } = await chrome.storage.local.get([
+  const stored = await chrome.storage.local.get([
     "ageeGatewayUrl",
     "ageeGatewayToken",
   ]);
@@ -60,9 +60,11 @@ async function getConfig() {
   // (e.g. the very first turn after install, or on a page that loaded the worker
   // before onInstalled ran). A stored value always overrides the default.
   const baked = await getBaked();
+  const hasStoredUrl = Object.prototype.hasOwnProperty.call(stored, "ageeGatewayUrl");
+  const hasStoredToken = Object.prototype.hasOwnProperty.call(stored, "ageeGatewayToken");
   return {
-    gatewayUrl: String(ageeGatewayUrl || baked.gatewayUrl || "").replace(/\/+$/, ""),
-    gatewayToken: String(ageeGatewayToken || baked.gatewayToken || ""),
+    gatewayUrl: String(hasStoredUrl ? stored.ageeGatewayUrl || "" : baked.gatewayUrl || "").replace(/\/+$/, ""),
+    gatewayToken: String(hasStoredToken ? stored.ageeGatewayToken || "" : baked.gatewayToken || ""),
   };
 }
 

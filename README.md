@@ -1,22 +1,22 @@
 # agee
 
-An open-source, browser-native interface shell. Hit **Cmd/Ctrl+K** or click the on-page control, type or speak, and experiment with an agent surface directly on the website you are using. Bring your own API key. You own the code; run it locally, modify it, or host it.
+An open-source, browser-native interface shell. Hit **Cmd/Ctrl+K** or click the on-page control, type or speak, and experiment with an agent surface directly on the website you are using. The extension is a thin client for your agent gateway: the browser holds only gateway connection state, while the gateway owns model routing, provider credentials, state, and customization serving.
 
 ## Principles
 
 - **You own it.** Open source. Not a silo — a unifying layer over the surfaces you already use.
-- **Bring your own key.** Your intelligence and your data are personal. Keys live in your browser, calls go straight to the model.
+- **Bring your own engine.** Your intelligence and your data are personal. The browser points at your self-hosted or hosted agent gateway; provider keys and subscriptions stay on that engine, not in the extension.
 - **Interface first.** This is not a sidebar or a separate browser agent. It is a small, movable surface on the page that can grow into user-owned workflows.
 - **Browser native.** The browser is the first surface because it is where the user's work already lives and where an extension can safely start with explicit user invocation.
-- **Self-host or local.** Same core whether it runs on your machine or ours.
+- **Self-host or hosted.** Same extension package whether the engine runs on your machine or a hosted gateway; switch by changing the gateway URL/token.
 
 ## Status
 
 MVP - a Chrome (Manifest V3) extension you can load unpacked today.
 
-**Works now:** Cmd+K command palette · on-page invocation surface · optional browser-native voice dictation · a controlled localhost dev page · a dev bridge that reloads the unpacked extension when code changes · experimental Claude action loop (your key) that can click / type / select / scroll / navigate on low-risk pages · per-step progress in the overlay.
+**Works now:** Cmd+K command palette · Cmd+. voice wake · Cmd+, text command bar · on-page invocation surface · optional browser-native voice dictation · a controlled localhost dev page · a developer-only reload bridge for unpacked-extension work · gateway-routed command/describe turns · runtime profile settings that read/write through the gateway · constrained browser actions on low-risk pages · per-cue progress in the overlay.
 
-**Next:** customization from inside the app · userScripts opt-in walkthrough · richer voice mode · cross-navigation task continuity · MOA integration · local-model backend.
+**Next:** engine-served declarative UI spec · userScripts opt-in walkthrough · richer voice mode · cross-navigation task continuity · MOA integration · hosted/self-hosted engine switching.
 
 ## Develop it (quiet by default)
 
@@ -64,8 +64,11 @@ The duck floats and wanders the page when idle, glows while it works, and rings
 (a short chime plus a ring pulse) when a turn finishes, errors, or needs you.
 To override the baked defaults, use the **agee** toolbar icon → Options.
 
-Optionally open `chrome-extension://<extension-id>/dev.html?server=http://localhost:7777`
-in that browser to get the in-page reload bridge for this manual session.
+Only while developing the extension package, optionally open
+`chrome-extension://<extension-id>/dev.html?server=http://localhost:7777` in
+that browser to get the in-page reload bridge for this manual session. This is a
+developer convenience for unpacked-extension work, not an end-user deployment or
+customization path.
 
 ## Verify it
 
@@ -90,8 +93,8 @@ than falling back to a content-script harness.
 
 ## Verify the gateway round-trip
 
-The overlay does not talk to the model vendor directly when a gateway is
-configured — it talks to **your** agent gateway. `smoke:gateway` proves that path
+The overlay does not talk to the model vendor directly. It talks to **your**
+agent gateway. `smoke:gateway` proves that path
 end to end, headless and off-screen (same quiet rules as `smoke`):
 
 ```sh
@@ -133,12 +136,13 @@ absent.
 
 - [extension/manifest.json](extension/manifest.json) — MV3 manifest, no build step.
 - [extension/content.js](extension/content.js) — the Cmd+K overlay, page perception, and action execution (the only part touching the DOM).
-- [extension/background.js](extension/background.js) — holds the key, runs the agent loop, calls the model, captures screenshots.
-- [extension/options.html](extension/options.html) / [options.js](extension/options.js) — key + model settings.
-- [extension/dev.html](extension/dev.html) / [dev.js](extension/dev.js) — in-page reload bridge for the manual visible dev session.
+- [extension/background.js](extension/background.js) — routes turns to the configured gateway, captures screenshots, validates brokered page actions, and handles extension commands.
+- [extension/options.html](extension/options.html) / [options.js](extension/options.js) — gateway URL/token and runtime profile settings that read/write through gateway profile endpoints.
+- [extension/dev.html](extension/dev.html) / [dev.js](extension/dev.js) — developer-only in-page reload bridge for the manual visible dev session.
 - [scripts/chrome-for-testing.mjs](scripts/chrome-for-testing.mjs) — resolves the headless Chrome for Testing binary and the quiet launch flags shared by the dev loop and smoke.
 
-The model call lives in the background service worker, not the page, so the network boundary stays in one place.
+Model/provider calls live on the gateway, not in the page or extension service
+worker, so provider credentials and subscriptions stay off the browser.
 
 ## Review artifacts
 
