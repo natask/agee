@@ -25,6 +25,10 @@
   let cueSeq = 0;
   const cues = new Map();
   const activeCues = new Set();
+  // Chat history is loaded exactly once per page load: the first time the
+  // overlay opens we fetch the persisted conversation and render it. Reopening
+  // must not refetch or duplicate rows.
+  let historyLoaded = false;
   // Replies are spoken one after another (parallel cues finishing together must
   // not talk over each other).
   const speechQueue = [];
@@ -158,15 +162,55 @@
     open = typeof force === "boolean" ? force : !open;
     if (!root) build();
     root.classList.toggle("agee-open", open);
-    if (open) setTimeout(() => input.focus(), 0);
+    if (open) {
+      setTimeout(() => input.focus(), 0);
+      loadHistoryOnce();
+    }
+  }
+
+  // On the first overlay open, pull the persisted conversation from the gateway
+  // and render each prior turn into the log: transcript as a "you" row, reply as
+  // an "agee" row. Guarded so reopening never refetches or duplicates rows.
+  // History is prepended so it always sits BEFORE any live turn that may have
+  // started while this async fetch was in flight.
+  function loadHistoryOnce() {
+    if (historyLoaded) return;
+    historyLoaded = true; // claim the slot up front so a fast reopen can't race a second fetch
+    let response;
+    try {
+      response = chrome.runtime.sendMessage({ cmd: "loadHistory" });
+    } catch {
+      return; // extension context gone; nothing to load
+    }
+    Promise.resolve(response)
+      .then((res) => {
+        const turns = Array.isArray(res?.turns) ? res.turns : [];
+        if (!turns.length || !log) return;
+        const fragment = document.createDocumentFragment();
+        for (const turn of turns) {
+          const transcript = String(turn?.transcript || "").trim();
+          const reply = String(turn?.reply || "").trim();
+          if (transcript) fragment.appendChild(makeRow("you", transcript));
+          if (reply) fragment.appendChild(makeRow("agee", reply));
+        }
+        // Prepend so restored history precedes any live cue cards already present.
+        log.insertBefore(fragment, log.firstChild);
+      })
+      .catch(() => {
+        // A history fetch failure must not break the overlay; leave it empty.
+      });
+  }
+
+  function makeRow(who, text) {
+    const row = document.createElement("div");
+    row.className = `agee-row agee-${who}`;
+    row.textContent = text;
+    return row;
   }
 
   function addLog(who, text) {
     if (!log) return;
-    const row = document.createElement("div");
-    row.className = `agee-row agee-${who}`;
-    row.textContent = text;
-    log.appendChild(row);
+    log.appendChild(makeRow(who, text));
     log.scrollTop = log.scrollHeight;
   }
 

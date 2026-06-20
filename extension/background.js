@@ -254,6 +254,31 @@ function sessionIdForCue(cueId) {
   return `agee_${String(cueId || "").replace(/[^a-zA-Z0-9_]/g, "") || Date.now().toString(36)}`;
 }
 
+// One stable session id for the whole conversation, persisted in
+// chrome.storage.local. Conversational turns share this id so the gateway
+// accumulates them under one session and the overlay can reload chat history
+// across reopens. Per-cue/branch distinction is preserved via branch_id (the
+// cueId), not by minting a throwaway session per message. Not a secret.
+async function getStableSessionId() {
+  const { ageeSessionId } = await chrome.storage.local.get("ageeSessionId");
+  if (ageeSessionId) return ageeSessionId;
+  const sessionId = `agee_${crypto.randomUUID()}`;
+  await chrome.storage.local.set({ ageeSessionId: sessionId });
+  return sessionId;
+}
+
+// Read the persisted conversation's ordered turns from the gateway so the
+// overlay can render prior turns when it reopens. Returns [] when nothing is
+// configured/stored yet (a fresh conversation simply has no history).
+async function loadHistory(cfg) {
+  if (!cfg.gatewayUrl) return [];
+  const sessionId = await getStableSessionId();
+  const data = await callGateway(cfg, `/v1/sessions/${encodeURIComponent(sessionId)}/turns`, {
+    method: "GET",
+  });
+  return Array.isArray(data?.turns) ? data.turns : [];
+}
+
 // Conversational turn through the user's gateway (/v1/voice/turns).
 // The gateway classifies chat vs. home-machine agent runs and replies with
 // display text; we render it. Page-DOM actions are a later wave.
@@ -271,11 +296,17 @@ async function runViaGateway(tabId, instruction, cfg, signal, cueId) {
   }
 
   throwIfAborted(signal);
+  // Share one stable session+conversation id across turns so the gateway
+  // accumulates them (and the overlay can reload them). The cueId becomes the
+  // branch_id, preserving per-cue distinction without fragmenting the session.
+  const sessionId = await getStableSessionId();
   const data = await callGateway(cfg, "/v1/voice/turns", {
     signal,
     body: {
       source: "agee-extension",
-      session_id: sessionIdForCue(cueId),
+      session_id: sessionId,
+      conversation_id: sessionId,
+      branch_id: cueId,
       transcript: instruction,
       screen,
     },
@@ -891,7 +922,23 @@ function cancelTabCues(tabId) {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.cmd === "loadHistory") {
+    // Async reply: fetch the persisted conversation's turns for the overlay to
+    // render on open. Returning true keeps the message channel open for the
+    // async sendResponse. Failures resolve to an empty history (never block the
+    // overlay): { turns, error? }.
+    (async () => {
+      try {
+        const cfg = await getConfig();
+        const turns = await loadHistory(cfg);
+        sendResponse({ turns });
+      } catch (error) {
+        sendResponse({ turns: [], error: String(error?.message || error) });
+      }
+    })();
+    return true;
+  }
   if (msg.cmd === "run" && sender.tab) {
     const tabId = sender.tab.id;
     const cueId = nextCueId(msg.cueId);
