@@ -56,9 +56,12 @@ is separate from the quiet flow on purpose:
    `extension/agee.config.json` (git-ignored), so the extension works on load
    with no Options visit. The token is read from the main machine over SSH (or
    `MOA_GATEWAY_TOKEN` in your environment) and never printed.
-2. Open `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the [extension/](extension/) folder. It stays installed across browser restarts.
-3. Open any low-risk page (or run `npm run dev -- --no-browser` and open `http://localhost:7777/fixtures/demo.html`).
-4. Press **Cmd+K** (Mac) / **Ctrl+K**, type an instruction (e.g. *"search docs for browser agent"*), hit Enter. If Chrome reports a shortcut conflict, set the shortcut at `chrome://extensions/shortcuts`.
+2. Run `npm run doctor`. It confirms the baked gateway URL/token, exercises the
+   live gateway with that token, and reports whether a daily browser profile has
+   agee loaded from this repo path.
+3. Open `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the [extension/](extension/) folder. If agee is already listed, click its reload icon and confirm the path shown in the card is this folder. It stays installed across browser restarts.
+4. Open any low-risk page (or run `npm run dev -- --no-browser` and open `http://localhost:7777/fixtures/demo.html`).
+5. Press **Cmd+K** (Mac) / **Ctrl+K**, type `test`, hit Enter. A healthy gateway-backed install should render a short reply such as `Hello, Captain.` or `Hi Captain.`. If you see an error mentioning an Anthropic key, Chrome is running an old extension/service worker; reload the agee card or remove the old copy and load [extension/](extension/) again.
 
 The duck floats and wanders the page when idle, glows while it works, and rings
 (a short chime plus a ring pulse) when a turn finishes, errors, or needs you.
@@ -75,9 +78,19 @@ customization path.
 Run:
 
 ```sh
+npm run doctor
 npm run verify
 npm run smoke
 ```
+
+`doctor` is the fast operational test for the default gateway setup. It checks
+that current source no longer contains the old browser-side Anthropic fallback,
+confirms `extension/agee.config.json` has the live gateway URL and a token
+without printing the token, posts a real authenticated turn to
+`/v1/voice/turns`, and scans common Chrome/Chromium profiles for an agee install
+that points at this checkout. A warning that no daily profile has agee installed
+means the headless tests can pass while the browser you are looking at is still
+missing or stale.
 
 `verify` checks that the MV3 manifest parses, required files exist, required
 permissions/commands are present, and the extension/harness JavaScript has valid
