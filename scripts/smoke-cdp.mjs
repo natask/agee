@@ -210,39 +210,36 @@ async function main() {
     // is created by the task agent.
     const pagesBefore = (await targets(devToolsPort)).filter((t) => t.type === "page").length;
 
-    // Trigger the router intent from the OVERLAY TAB's content-script context, so
-    // background.js sees sender.tab (the production path) and routes the cue back
-    // to this tab. We inject via chrome.scripting.executeScript from the service
-    // worker, which runs in the content script's isolated world where
-    // chrome.runtime exists and sender.tab is the overlay tab — exactly the edge
-    // the real overlay uses when it sends {cmd:"branch"}.
-    const cueId = `smoke_cdp_${Date.now().toString(36)}`;
-    const dispatched = await evaluate(workerCdp, `
-      (async () => {
-        await chrome.scripting.executeScript({
-          target: { tabId: ${ping.tabId} },
-          func: (url, cueId) => {
-            chrome.runtime.sendMessage({
-              cmd: "branch",
-              instruction: "smoke: open demo page in a background task agent",
-              url,
-              cueId,
-            });
-          },
-          args: [${JSON.stringify(branchUrl)}, ${JSON.stringify(cueId)}],
-        });
+    // Trigger the same route a user does: open the command bar, type a natural
+    // language browser-task request, and press Enter. The content script creates
+    // a real cue card, background.js parses the URL/report intent, and the CDP
+    // task agent runs in its own background tab.
+    await evaluate(workerCdp, `chrome.tabs.sendMessage(${ping.tabId}, { cmd: "open" }).then(() => true)`);
+    await waitForEval(pageCdp, `Boolean(document.getElementById("agee-input"))`);
+    await evaluate(pageCdp, `
+      (() => {
+        const input = document.getElementById("agee-input");
+        input.value = ${JSON.stringify(`open ${branchUrl} and report the page title`)};
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
         return true;
       })()
     `);
-    if (!dispatched) throw new Error("failed to dispatch branch intent from the overlay tab");
+    const cueId = await waitForEval(pageCdp, `
+      (() => {
+        const card = [...document.querySelectorAll("#agee-log .agee-cue")].pop();
+        return card ? card.dataset.cue : null;
+      })()
+    `);
+    if (!cueId) throw new Error("typed browser-task request did not create a cue card");
 
-    // (c) Assert the completion "done" cue rendered in the overlay log. An
-    // unknown cueId falls back to an "agee-done" row in #agee-log.
+    // (c) Assert the completion "done" cue rendered in the overlay log.
     const doneText = await waitForEval(
       pageCdp,
       `(() => {
-        const row = document.querySelector("#agee-log .agee-done");
-        return row ? row.textContent : null;
+        const card = document.querySelector(${JSON.stringify(`#agee-log .agee-cue[data-cue="${cueId}"]`)});
+        if (!card || !card.classList.contains("agee-cue-done")) return null;
+        const status = card.querySelector(".agee-cue-status");
+        return status ? status.textContent : null;
       })()`,
       20000,
     );

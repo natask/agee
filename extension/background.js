@@ -5,6 +5,7 @@
 
 import { getEffectiveGatewayConfig, seedGatewayConfig } from "./config.js";
 import { parseSettingsIntent, parseProfileQueryIntent } from "./settings-intent.js";
+import { parseBrowserTaskIntent } from "./browser-task-intent.js";
 
 // Seed storage from the baked defaults on install/update so the Options page
 // shows the live values and the user never has to fill them in by hand. Only
@@ -487,6 +488,11 @@ async function runAgent(tabId, instruction, controller, cueId) {
       return;
     }
     if (await maybeApplySettingsChange(tabId, instruction, cfg, signal, cueId)) {
+      return;
+    }
+    const browserTask = parseBrowserTaskIntent(instruction);
+    if (browserTask) {
+      await runBranchTaskAgent(tabId, browserTask.instruction, browserTask.url, controller, cueId);
       return;
     }
     await runViaGateway(tabId, instruction, cfg, signal, cueId);

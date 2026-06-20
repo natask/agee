@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 const requiredFiles = [
   "extension/manifest.json",
   "extension/background.js",
+  "extension/browser-task-intent.js",
   "extension/config.js",
   "extension/content.js",
   "extension/tweaks.js",
@@ -50,6 +51,7 @@ if (!manifest.commands?.["toggle-agee"]) {
 
 for (const file of [
   "extension/background.js",
+  "extension/browser-task-intent.js",
   "extension/config.js",
   "extension/content.js",
   "extension/tweaks.js",
@@ -68,6 +70,27 @@ for (const file of [
   "scripts/chrome-for-testing.mjs",
 ]) {
   execFileSync(process.execPath, ["--check", file], { stdio: "inherit" });
+}
+
+const { parseSettingsIntent } = await import("../extension/settings-intent.js");
+const { parseBrowserTaskIntent } = await import("../extension/browser-task-intent.js");
+
+const setupParagraph =
+  'Open chrome://extensions, find agee, click reload. If it was loaded from elsewhere, remove it and Load unpacked from software/browser_extension/extension/.\n' +
+  'On any page, press Cmd+K to open it, and type a request, for example "summarize this page" or "what can you do." You get a response from the gateway. Tell it "use the Kore voice" and it changes its own voice. Ask it to open a page and report something, and it launches a browser agent.';
+const voiceIntent = parseSettingsIntent("use the Kore voice", null);
+if (voiceIntent?.patch?.voice !== "Kore") {
+  throw new Error("settings parser should accept a direct Kore voice request");
+}
+if (parseSettingsIntent(setupParagraph, null) !== null) {
+  throw new Error("settings parser should ignore quoted settings examples inside setup text");
+}
+const taskIntent = parseBrowserTaskIntent("open https://example.com/docs and report the title");
+if (taskIntent?.url !== "https://example.com/docs") {
+  throw new Error(`browser-task parser returned unexpected URL: ${taskIntent?.url}`);
+}
+if (parseBrowserTaskIntent(setupParagraph) !== null) {
+  throw new Error("browser-task parser should not treat setup text as a browser task");
 }
 
 console.log("extension verification passed");

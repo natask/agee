@@ -180,6 +180,13 @@ const MATCHERS = [
 function parseSettingsIntent(text, current) {
   const raw = String(text || "").trim();
   if (!raw) return null;
+  const explicitSystemPrompt = matchSystemPrompt(raw);
+  if (explicitSystemPrompt && startsWithSystemPromptSetter(raw)) {
+    return explicitSystemPrompt;
+  }
+  if (looksLikeInstructionalExample(raw)) {
+    return null;
+  }
   // A leading verb is a strong settings signal but not required for the
   // shorthands ("be terser"). Each matcher is responsible for its own anchor.
   for (const matcher of MATCHERS) {
@@ -189,6 +196,19 @@ function parseSettingsIntent(text, current) {
     }
   }
   return null;
+}
+
+function startsWithSystemPromptSetter(raw) {
+  return /^\s*(?:(?:set|change|make|update)\s+)?(?:your\s+|the\s+)?system\s*prompt\b/i.test(raw) ||
+    /^\s*(?:set|change|make|update)\s+(?:your\s+|the\s+)?prompt\b/i.test(raw);
+}
+
+function looksLikeInstructionalExample(raw) {
+  const sentenceCount = raw.split(/[.!?]\s+/).filter((part) => part.trim()).length;
+  if (sentenceCount < 2) return false;
+  const hasQuotedCommand = /["“][^"”]{0,140}\b(?:use|set|switch|be|change|make|update)\b[^"”]{0,140}["”]/i.test(raw);
+  const hasInstructionalFrame = /\b(?:for example|e\.g\.|tell it|type a request|press|open chrome|load unpacked)\b/i.test(raw);
+  return hasQuotedCommand && hasInstructionalFrame;
 }
 
 function hasUsableFields(patch) {
