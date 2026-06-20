@@ -52,10 +52,17 @@ The default loop above is intentionally invisible. When you actually want to
 *watch* the extension on screen, this manual route is the only one to use — it
 is separate from the quiet flow on purpose:
 
-1. Open `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the [extension/](extension/) folder.
-2. Click the **agee** toolbar icon → paste your Anthropic API key (or set the gateway URL) → Save.
-3. Run `npm run dev -- --no-browser` and open `http://localhost:7777/fixtures/demo.html`. For any other low-risk page, open it normally.
+1. Run `npm run configure`. This bakes the gateway URL and token into
+   `extension/agee.config.json` (git-ignored), so the extension works on load
+   with no Options visit. The token is read from the main machine over SSH (or
+   `MOA_GATEWAY_TOKEN` in your environment) and never printed.
+2. Open `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the [extension/](extension/) folder. It stays installed across browser restarts.
+3. Open any low-risk page (or run `npm run dev -- --no-browser` and open `http://localhost:7777/fixtures/demo.html`).
 4. Press **Cmd+K** (Mac) / **Ctrl+K**, type an instruction (e.g. *"search docs for browser agent"*), hit Enter. If Chrome reports a shortcut conflict, set the shortcut at `chrome://extensions/shortcuts`.
+
+The duck floats and wanders the page when idle, glows while it works, and rings
+(a short chime plus a ring pulse) when a turn finishes, errors, or needs you.
+To override the baked defaults, use the **agee** toolbar icon → Options.
 
 Optionally open `chrome-extension://<extension-id>/dev.html?server=http://localhost:7777`
 in that browser to get the in-page reload bridge for this manual session.

@@ -11,25 +11,148 @@
   position: absolute;
   right: 18px;
   bottom: 18px;
-  width: 52px;
-  height: 52px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  width: 54px;
+  height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 50%;
-  background: #111114;
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.34);
-  color: #f4f4f5;
+  background: radial-gradient(120% 120% at 32% 26%, #2a2a33 0%, #141418 55%, #0b0b0e 100%);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  color: #ffd76a;
   cursor: grab;
-  font: 600 12px/1 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
-  letter-spacing: 0;
+  padding: 0;
   pointer-events: auto;
-  text-transform: lowercase;
   touch-action: none;
+  overflow: visible;
+  transition: box-shadow 0.3s ease, transform 0.2s ease;
+}
+/* The bird floats with a gentle, always-on bob so it reads as alive. The hop /
+   shake reactions ride on top by overriding this on the launcher itself. */
+#agee-launcher .agee-bird {
+  width: 31px;
+  height: 31px;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.4));
+  animation: agee-bob 2.6s ease-in-out infinite;
 }
 #agee-launcher:hover {
-  background: #1b1b20;
+  transform: scale(1.06);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.46), 0 0 0 4px rgba(255, 215, 106, 0.1);
 }
 #agee-launcher:active {
   cursor: grabbing;
+}
+/* A soft shadow puddle under the duck grounds it as it floats and glides. */
+#agee-launcher .agee-shadow {
+  position: absolute;
+  left: 50%;
+  bottom: -7px;
+  width: 30px;
+  height: 7px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.32);
+  filter: blur(2px);
+  pointer-events: none;
+  animation: agee-shadow 2.6s ease-in-out infinite;
+}
+/* Face the way it is gliding. */
+#agee-launcher.agee-face-left .agee-bird {
+  transform: scaleX(-1);
+}
+/* Wander glide: animate position so it drifts instead of snapping. Set only
+   while a wander move is in flight, so a deliberate drag stays instant. */
+#agee-launcher.agee-gliding {
+  transition: left 2.2s cubic-bezier(0.45, 0.05, 0.2, 1),
+    top 2.2s cubic-bezier(0.45, 0.05, 0.2, 1), box-shadow 0.3s ease, transform 0.2s ease;
+}
+/* Busy: a breathing amber halo while a turn is running, panel open or closed. */
+#agee-launcher.agee-busy {
+  animation: agee-busy-glow 1.5s ease-in-out infinite;
+}
+/* Live-state glows mirror the voice orb: listening green, thinking amber,
+   speaking blue. These tint the duck so the page-level launcher carries state. */
+#agee-root.agee-state-listening #agee-launcher {
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(53, 199, 89, 0.5), 0 0 22px rgba(53, 199, 89, 0.45);
+}
+#agee-root.agee-state-thinking #agee-launcher {
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(245, 166, 35, 0.5), 0 0 22px rgba(245, 166, 35, 0.45);
+}
+#agee-root.agee-state-speaking #agee-launcher {
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(74, 155, 255, 0.5), 0 0 22px rgba(74, 155, 255, 0.45);
+}
+/* The ring that fires when something lands. Colour carries the kind. */
+#agee-launcher .agee-ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  opacity: 0;
+  pointer-events: none;
+}
+#agee-launcher .agee-ring.agee-ring-go {
+  animation: agee-ring 0.7s ease-out;
+}
+#agee-launcher .agee-ring[data-kind="done"] {
+  border-color: #35c759;
+}
+#agee-launcher .agee-ring[data-kind="error"] {
+  border-color: #ff453a;
+}
+#agee-launcher .agee-ring[data-kind="attention"] {
+  border-color: #f5a623;
+}
+#agee-launcher.agee-hop {
+  animation: agee-hop 0.5s ease;
+}
+#agee-launcher.agee-shake {
+  animation: agee-shake 0.45s ease;
+}
+#agee-launcher.agee-attention {
+  animation: agee-attention 0.6s ease;
+}
+@keyframes agee-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes agee-shadow {
+  0%, 100% { transform: translateX(-50%) scale(1); opacity: 0.32; }
+  50% { transform: translateX(-50%) scale(0.82); opacity: 0.2; }
+}
+@keyframes agee-busy-glow {
+  0%, 100% { box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4), 0 0 0 2px rgba(245, 166, 35, 0.35), 0 0 16px rgba(245, 166, 35, 0.3); }
+  50% { box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4), 0 0 0 4px rgba(245, 166, 35, 0.55), 0 0 28px rgba(245, 166, 35, 0.55); }
+}
+@keyframes agee-ring {
+  0% { opacity: 0.9; transform: scale(0.8); }
+  100% { opacity: 0; transform: scale(2.1); }
+}
+@keyframes agee-hop {
+  0%, 100% { transform: translateY(0) scale(1); }
+  35% { transform: translateY(-12px) scale(1.08, 0.94); }
+  60% { transform: translateY(0) scale(0.96, 1.05); }
+  80% { transform: translateY(-3px) scale(1); }
+}
+@keyframes agee-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-5px) rotate(-5deg); }
+  40% { transform: translateX(5px) rotate(5deg); }
+  60% { transform: translateX(-4px) rotate(-3deg); }
+  80% { transform: translateX(4px) rotate(3deg); }
+}
+@keyframes agee-attention {
+  0%, 100% { transform: scale(1); }
+  25% { transform: scale(1.14); }
+  50% { transform: scale(0.96); }
+  75% { transform: scale(1.08); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #agee-launcher .agee-bird,
+  #agee-launcher .agee-shadow,
+  #agee-launcher.agee-busy { animation: none; }
+  #agee-launcher.agee-gliding { transition: none; }
 }
 #agee-panel {
   display: none;
@@ -48,6 +171,62 @@
 }
 #agee-root.agee-open #agee-panel {
   display: block;
+}
+/* Voice surface: the visible "agent is up" banner. Hidden until a voice session
+   starts; the orb color + pulse carry the live phase, the transcript bar shows
+   the user's words as they land. */
+#agee-voice-state {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #1d1d20;
+  background: linear-gradient(180deg, #141419 0%, #0d0d0f 100%);
+}
+#agee-root.agee-voicing #agee-voice-state {
+  display: flex;
+}
+#agee-orb {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #555;
+  box-shadow: 0 0 0 0 rgba(245, 166, 35, 0.5);
+}
+#agee-transcript {
+  flex: 1;
+  font-size: 14.5px;
+  line-height: 1.45;
+  color: #f2f2f2;
+  min-height: 1.45em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#agee-transcript.agee-interim {
+  color: #8b8b93;
+}
+/* Listening: green orb breathing. Thinking: amber pulse. Speaking: blue glow. */
+#agee-root.agee-state-listening #agee-orb {
+  background: #35c759;
+  animation: agee-orb-breathe 1.6s ease-in-out infinite;
+}
+#agee-root.agee-state-thinking #agee-orb {
+  background: #f5a623;
+  animation: agee-pulse 0.9s infinite;
+}
+#agee-root.agee-state-speaking #agee-orb {
+  background: #4a9bff;
+  animation: agee-orb-breathe 1.1s ease-in-out infinite;
+}
+@keyframes agee-orb-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(74, 155, 255, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(74, 155, 255, 0);
+  }
 }
 #agee-bar {
   display: flex;

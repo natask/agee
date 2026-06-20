@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "agee",
   "version": "0.1.0",
-  "description": "Open-source browser agent. Cmd+K, bring your own key. It sees your page and acts in it.",
+  "description": "Open-source browser agent. Double-tap ⌘ to talk, ⌘. to type. Bring your own key. It sees your page and acts in it.",
   "permissions": ["activeTab", "tabs", "scripting", "storage", "debugger"],
   "host_permissions": ["https://api.anthropic.com/*", "http://localhost/*", "http://10.147.17.10/*", "http://10.147.17.6/*"],
   "background": {
@@ -11,7 +11,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "matches": ["<all_urls>"],
       "js": ["content.js"],
       "css": ["overlay.css"],
       "run_at": "document_idle"

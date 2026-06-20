@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "configure": "node scripts/configure.mjs",
     "dev": "node scripts/dev-extension.mjs",
     "smoke": "node scripts/smoke-extension.mjs",
     "smoke:cdp": "node scripts/smoke-cdp.mjs",

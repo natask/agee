@@ -6,6 +6,48 @@ import { parseSettingsIntent, parseProfileQueryIntent } from "./settings-intent.
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MODEL = "claude-opus-4-8";
+
+// Baked defaults so a fresh install works with no Options visit. The gateway URL
+// is safe to ship in code; the token is injected locally by `npm run configure`
+// into the git-ignored agee.config.json. Loaded at runtime via fetch (MV3
+// service workers forbid top-level await, so no import here). A missing config
+// file just means "configure has not been run yet" — the URL fallback applies.
+const BAKED_FALLBACK = { gatewayUrl: "http://10.147.17.10:8788", gatewayToken: "", model: DEFAULT_MODEL };
+let bakedCache = null;
+
+async function getBaked() {
+  if (bakedCache) return bakedCache;
+  try {
+    const resp = await fetch(chrome.runtime.getURL("agee.config.json"));
+    if (resp.ok) {
+      const cfg = await resp.json();
+      bakedCache = {
+        gatewayUrl: String(cfg.gatewayUrl || BAKED_FALLBACK.gatewayUrl),
+        gatewayToken: String(cfg.gatewayToken || ""),
+        model: String(cfg.model || DEFAULT_MODEL),
+      };
+      return bakedCache;
+    }
+  } catch {
+    // No local config yet; the URL fallback keeps the agent usable for any
+    // endpoint that does not require the token (e.g. /health).
+  }
+  bakedCache = { ...BAKED_FALLBACK };
+  return bakedCache;
+}
+
+// Seed storage from the baked defaults on install/update so the Options page
+// shows the live values and the user never has to fill them in by hand. Only
+// fills blanks — a value the user typed always wins.
+chrome.runtime.onInstalled.addListener(async () => {
+  const baked = await getBaked();
+  const cur = await chrome.storage.local.get(["ageeGatewayUrl", "ageeGatewayToken", "ageeModel"]);
+  const patch = {};
+  if (!cur.ageeGatewayUrl && baked.gatewayUrl) patch.ageeGatewayUrl = baked.gatewayUrl;
+  if (!cur.ageeGatewayToken && baked.gatewayToken) patch.ageeGatewayToken = baked.gatewayToken;
+  if (!cur.ageeModel && baked.model) patch.ageeModel = baked.model;
+  if (Object.keys(patch).length) await chrome.storage.local.set(patch);
+});
 const MAX_STEPS = 20;
 const MAX_ELEMENTS = 100;
 const ALLOWED_NAVIGATION_PROTOCOLS = new Set(["http:", "https:"]);
@@ -69,11 +111,15 @@ async function getConfig() {
     "ageeGatewayUrl",
     "ageeGatewayToken",
   ]);
+  // Fall back to the baked defaults so the agent works before storage is seeded
+  // (e.g. the very first turn after install, or on a page that loaded the worker
+  // before onInstalled ran). A stored value always overrides the default.
+  const baked = await getBaked();
   return {
     apiKey: ageeApiKey,
-    model: ageeModel || DEFAULT_MODEL,
-    gatewayUrl: String(ageeGatewayUrl || "").replace(/\/+$/, ""),
-    gatewayToken: String(ageeGatewayToken || ""),
+    model: ageeModel || baked.model || DEFAULT_MODEL,
+    gatewayUrl: String(ageeGatewayUrl || baked.gatewayUrl || "").replace(/\/+$/, ""),
+    gatewayToken: String(ageeGatewayToken || baked.gatewayToken || ""),
   };
 }
 
