@@ -820,6 +820,54 @@ function cancelTabCues(tabId) {
   }
 }
 
+// ---- Ambient capture loop (continuous / rung-3 interaction mode) ----------
+// While active, sample the screen on a fixed interval (~200ms target) and POST
+// each frame to the gateway's /v1/voice/frames intake. Self-throttling: it
+// never overlaps a post, so a slow capture lowers the effective rate instead of
+// piling requests up. One ambient run at a time (one person, one screen).
+const AMBIENT_MIN_INTERVAL_MS = 100;
+const AMBIENT_DEFAULT_INTERVAL_MS = 200;
+let ambient = null; // { tabId, timer, seq, inFlight, sessionId }
+
+async function startAmbientCapture(tabId, intervalMs) {
+  if (ambient) stopAmbientCapture();
+  const interval = Math.max(AMBIENT_MIN_INTERVAL_MS, Number(intervalMs) || AMBIENT_DEFAULT_INTERVAL_MS);
+  const sessionId = await getStableSessionId();
+  ambient = { tabId, timer: null, seq: 0, inFlight: false, sessionId };
+  send(tabId, { cmd: "ambient", state: "on" });
+  ambient.timer = setInterval(() => captureAmbientFrame().catch(() => {}), interval);
+}
+
+function stopAmbientCapture() {
+  if (!ambient) return;
+  clearInterval(ambient.timer);
+  const tabId = ambient.tabId;
+  ambient = null;
+  try { send(tabId, { cmd: "ambient", state: "off" }); } catch {}
+}
+
+async function captureAmbientFrame() {
+  if (!ambient || ambient.inFlight) return; // self-throttle: skip while a post is pending
+  ambient.inFlight = true;
+  const tabId = ambient.tabId;
+  try {
+    const cfg = await getConfig();
+    if (!cfg.gatewayUrl) { stopAmbientCapture(); return; }
+    let screen;
+    try {
+      const snap = await ask(tabId, { cmd: "snapshot" });
+      screen = snapToScreen(snap);
+    } catch {
+      screen = undefined; // restricted page; still send a frame so cadence holds
+    }
+    await callGateway(cfg, "/v1/voice/frames", {
+      body: { source: "agee-extension", session_id: ambient.sessionId, seq: ambient.seq++, screen },
+    });
+  } finally {
+    if (ambient) ambient.inFlight = false;
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // No sessions: the overlay never asks for prior history. (loadHistory remains
   // available to the gateway plumbing but is no longer wired to the surface.)
@@ -868,6 +916,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       cancelTabCues(tabId);
     }
   }
+  if (msg.cmd === "ambientStart" && sender.tab) {
+    startAmbientCapture(sender.tab.id, msg.intervalMs);
+  }
+  if (msg.cmd === "ambientStop") {
+    stopAmbientCapture();
+  }
+});
+
+// Stop the ambient loop if its tab goes away, so it never posts against a dead tab.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (ambient && ambient.tabId === tabId) stopAmbientCapture();
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
