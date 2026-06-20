@@ -34,23 +34,12 @@
   </head>
   <body>
     <h1>agee</h1>
-    <p class="sub">Open-source browser agent. Cmd/Ctrl+K on any page. Your key, your machine.</p>
-
-    <h2>Direct (bring-your-own-key)</h2>
-    <label for="key">Anthropic API key</label>
-    <input id="key" type="password" placeholder="sk-ant-..." />
-    <div class="hint">Stored locally in this browser only. Get one at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a>.</div>
-
-    <label for="model">Model</label>
-    <input id="model" type="text" placeholder="claude-opus-4-8" />
-    <div class="hint">Default: claude-opus-4-8. Used only for the direct (bring-your-own-key) path.</div>
-
-    <hr />
+    <p class="sub">Open-source browser agent. Cmd/Ctrl+K on any page. Pipes to your self-hosted gateway, your machine.</p>
 
     <h2>Agent gateway</h2>
     <label for="gatewayUrl">Agent gateway URL</label>
     <input id="gatewayUrl" type="text" placeholder="http://10.147.17.10:8788" />
-    <div class="hint">Pipe requests to your own agent infrastructure instead of calling the model vendor directly. Leave blank to use the direct key path.</div>
+    <div class="hint">Every turn is routed to your own agent gateway, which owns model routing and credentials. The browser never holds a provider key.</div>
 
     <label for="gatewayToken">Gateway token</label>
     <input id="gatewayToken" type="password" placeholder="(optional)" />

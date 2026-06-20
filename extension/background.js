@@ -1,18 +1,16 @@
 // agee — background service worker.
-// Holds the API key, runs the agent loop, talks to the page via the content script.
-// The model call lives here (not the page) so we control the network boundary.
+// Thin client: every turn is routed to the user's self-hosted gateway. No
+// provider API keys and no direct model calls live in the browser; the gateway
+// owns model routing and credentials.
 
 import { parseSettingsIntent, parseProfileQueryIntent } from "./settings-intent.js";
-
-const API_URL = "https://api.anthropic.com/v1/messages";
-const DEFAULT_MODEL = "claude-opus-4-8";
 
 // Baked defaults so a fresh install works with no Options visit. The gateway URL
 // is safe to ship in code; the token is injected locally by `npm run configure`
 // into the git-ignored agee.config.json. Loaded at runtime via fetch (MV3
 // service workers forbid top-level await, so no import here). A missing config
 // file just means "configure has not been run yet" — the URL fallback applies.
-const BAKED_FALLBACK = { gatewayUrl: "http://10.147.17.10:8788", gatewayToken: "", model: DEFAULT_MODEL };
+const BAKED_FALLBACK = { gatewayUrl: "http://10.147.17.10:8788", gatewayToken: "" };
 let bakedCache = null;
 
 async function getBaked() {
@@ -24,7 +22,6 @@ async function getBaked() {
       bakedCache = {
         gatewayUrl: String(cfg.gatewayUrl || BAKED_FALLBACK.gatewayUrl),
         gatewayToken: String(cfg.gatewayToken || ""),
-        model: String(cfg.model || DEFAULT_MODEL),
       };
       return bakedCache;
     }
@@ -41,14 +38,12 @@ async function getBaked() {
 // fills blanks — a value the user typed always wins.
 chrome.runtime.onInstalled.addListener(async () => {
   const baked = await getBaked();
-  const cur = await chrome.storage.local.get(["ageeGatewayUrl", "ageeGatewayToken", "ageeModel"]);
+  const cur = await chrome.storage.local.get(["ageeGatewayUrl", "ageeGatewayToken"]);
   const patch = {};
   if (!cur.ageeGatewayUrl && baked.gatewayUrl) patch.ageeGatewayUrl = baked.gatewayUrl;
   if (!cur.ageeGatewayToken && baked.gatewayToken) patch.ageeGatewayToken = baked.gatewayToken;
-  if (!cur.ageeModel && baked.model) patch.ageeModel = baked.model;
   if (Object.keys(patch).length) await chrome.storage.local.set(patch);
 });
-const MAX_STEPS = 20;
 const MAX_ELEMENTS = 100;
 const ALLOWED_NAVIGATION_PROTOCOLS = new Set(["http:", "https:"]);
 // Cues run concurrently: the user keeps talking, each utterance is its own lane.
@@ -56,58 +51,8 @@ const ALLOWED_NAVIGATION_PROTOCOLS = new Set(["http:", "https:"]);
 // can cancel one cue or all cues on a tab without blocking new ones.
 const tasks = new Map();
 
-const SYSTEM_PROMPT = `You are agee, an agent that operates a web browser on the user's behalf.
-
-Each turn you receive: the page URL/title, a numbered list of interactable elements, and a screenshot.
-Decide the single next action that moves toward the user's goal, then call a tool.
-
-Rules:
-- Refer to elements by their index from the list.
-- Prefer one concrete action per turn. After it runs you get a fresh snapshot.
-- To type into a field, click it first if it is not already focused, or use action "type" which focuses by index.
-- When the goal is achieved (or you are blocked and need the user), call "finish" with a short summary.
-- Be decisive. Do not narrate options you won't take.`;
-
-const DESCRIBE_PROMPT = `You are agee, a concise browser companion.
-
-Describe the current page from the user's point of view. Use the supplied page metadata, visible controls, and screenshot. Do not suggest actions unless they are obvious next steps available on the page. Do not claim you clicked, typed, navigated, or changed anything.`;
-
-const TOOLS = [
-  {
-    name: "act",
-    description: "Perform one action in the browser.",
-    input_schema: {
-      type: "object",
-      properties: {
-        action: {
-          type: "string",
-          enum: ["click", "type", "clear", "select", "scroll", "navigate", "key", "wait"],
-          description:
-            "click/type/clear/select target element by index; scroll the page; navigate to a url; key presses a key (e.g. Enter); wait pauses briefly.",
-        },
-        index: { type: "integer", description: "Element index for click/type/clear/select." },
-        text: { type: "string", description: "Text to type, option label to select, or key to press." },
-        url: { type: "string", description: "Absolute URL for navigate." },
-        direction: { type: "string", enum: ["up", "down"], description: "Scroll direction." },
-      },
-      required: ["action"],
-    },
-  },
-  {
-    name: "finish",
-    description: "End the task: goal achieved, or blocked and handing control back to the user.",
-    input_schema: {
-      type: "object",
-      properties: { summary: { type: "string", description: "One or two sentences on what happened." } },
-      required: ["summary"],
-    },
-  },
-];
-
 async function getConfig() {
-  const { ageeApiKey, ageeModel, ageeGatewayUrl, ageeGatewayToken } = await chrome.storage.local.get([
-    "ageeApiKey",
-    "ageeModel",
+  const { ageeGatewayUrl, ageeGatewayToken } = await chrome.storage.local.get([
     "ageeGatewayUrl",
     "ageeGatewayToken",
   ]);
@@ -116,8 +61,6 @@ async function getConfig() {
   // before onInstalled ran). A stored value always overrides the default.
   const baked = await getBaked();
   return {
-    apiKey: ageeApiKey,
-    model: ageeModel || baked.model || DEFAULT_MODEL,
     gatewayUrl: String(ageeGatewayUrl || baked.gatewayUrl || "").replace(/\/+$/, ""),
     gatewayToken: String(ageeGatewayToken || baked.gatewayToken || ""),
   };
@@ -506,27 +449,6 @@ async function executeAction(tabId, input, signal) {
   return (result && result.result) || "done";
 }
 
-async function callClaude({ apiKey, model }, messages, signal, { system = SYSTEM_PROMPT, tools = TOOLS } = {}) {
-  const body = { model, max_tokens: 1500, system, messages };
-  if (tools?.length) body.tools = tools;
-  const resp = await fetch(API_URL, {
-    method: "POST",
-    signal,
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`Anthropic API ${resp.status}: ${body.slice(0, 300)}`);
-  }
-  return resp.json();
-}
-
 // Map a page snapshot into the gateway's screen-context shape so the same
 // home-machine context format works for browser and Android surfaces.
 function snapToScreen(snap) {
@@ -570,33 +492,13 @@ async function describePage(tabId, controller, cueId) {
   try {
     const cfg = await getConfig();
 
-    // Prefer the user's own agent gateway (the pipe) when configured.
-    if (cfg.gatewayUrl) {
-      await describePageViaGateway(tabId, cfg, signal, cueId);
+    // Thin client: page description is produced by the user's gateway. There is
+    // no in-browser model path.
+    if (!cfg.gatewayUrl) {
+      send(tabId, { cmd: "error", cueId, text: "No gateway URL set. Click the agee toolbar icon → Options and set the Agent gateway URL." });
       return;
     }
-
-    if (!cfg.apiKey) {
-      send(tabId, { cmd: "error", cueId, text: "No gateway URL and no API key set. Click the agee toolbar icon -> Options to set a gateway URL or add your Anthropic key." });
-      return;
-    }
-
-    await saveTaskState(cueId, { status: "running", instruction: "Describe this page", step: 0, lastResult: "reading page", tabId });
-    send(tabId, { cmd: "progress", cueId, text: "reading the page…" });
-    const blocks = await snapshotBlocks(tabId, signal);
-    const messages = [
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Describe this page in 3-5 compact bullets. Include what it is and what the user can do here." },
-          ...blocks,
-        ],
-      },
-    ];
-    const resp = await callClaude(cfg, messages, signal, { system: DESCRIBE_PROMPT, tools: [] });
-    const text = resp.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim() || "I could not describe this page.";
-    send(tabId, { cmd: "done", cueId, summary: text });
-    await saveTaskState(cueId, { status: "done", instruction: "Describe this page", step: 1, lastResult: text.slice(0, 500), tabId });
+    await describePageViaGateway(tabId, cfg, signal, cueId);
   } catch (err) {
     const message = signal.aborted ? "Task cancelled." : String(err.message || err);
     send(tabId, { cmd: signal.aborted ? "done" : "error", cueId, summary: message, text: message });
@@ -612,74 +514,24 @@ async function runAgent(tabId, instruction, controller, cueId) {
   try {
     const cfg = await getConfig();
 
-    // Prefer the user's own agent gateway (the pipe). Conversational + home-machine
-    // agent runs; customize behavior by editing the gateway's SYSTEM_PROMPT.
-    if (cfg.gatewayUrl) {
-      // First, see if the user is asking *about* their prompt history, then if
-      // they are changing settings by talking to the agent ("be terser", "set
-      // the system prompt to …"). Either is handled through the profile
-      // endpoints instead of running a conversational turn.
-      if (await maybeAnswerProfileQuery(tabId, instruction, cfg, signal, cueId)) {
-        return;
-      }
-      if (await maybeApplySettingsChange(tabId, instruction, cfg, signal, cueId)) {
-        return;
-      }
-      await runViaGateway(tabId, instruction, cfg, signal, cueId);
+    // Thin client: every turn is handled by the user's self-hosted gateway.
+    // There is no in-browser model path or provider key.
+    if (!cfg.gatewayUrl) {
+      send(tabId, { cmd: "error", cueId, text: "No gateway URL set. Click the agee toolbar icon → Options and set the Agent gateway URL." });
       return;
     }
 
-    if (!cfg.apiKey) {
-      send(tabId, { cmd: "error", cueId, text: "No gateway URL and no API key set. Click the agee toolbar icon → Options to set a gateway URL or add your Anthropic key." });
+    // First, see if the user is asking *about* their prompt history, then if
+    // they are changing settings by talking to the agent ("be terser", "set
+    // the system prompt to …"). Either is handled through the profile
+    // endpoints instead of running a conversational turn.
+    if (await maybeAnswerProfileQuery(tabId, instruction, cfg, signal, cueId)) {
       return;
     }
-
-    await saveTaskState(cueId, { status: "running", instruction, step: 0, lastResult: "started", tabId });
-    send(tabId, { cmd: "progress", cueId, text: "thinking…" });
-    const first = await snapshotBlocks(tabId, signal);
-    const messages = [
-      { role: "user", content: [{ type: "text", text: `TASK: ${instruction}` }, ...first] },
-    ];
-    for (let step = 0; step < MAX_STEPS; step++) {
-      await saveTaskState(cueId, { status: "running", instruction, step, lastResult: "calling model", tabId });
-      throwIfAborted(signal);
-      const resp = await callClaude(cfg, messages, signal);
-      messages.push({ role: "assistant", content: resp.content });
-
-      const text = resp.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-      if (text) send(tabId, { cmd: "progress", cueId, text });
-      if (text) await saveTaskState(cueId, { status: "running", instruction, step, lastResult: text.slice(0, 500), tabId });
-
-      if (resp.stop_reason !== "tool_use") {
-        send(tabId, { cmd: "done", cueId, summary: text || "Stopped." });
-        await saveTaskState(cueId, { status: "done", instruction, step, lastResult: text || "Stopped.", tabId });
-        return;
-      }
-
-      const toolResults = [];
-      let finished = false;
-      for (const block of resp.content) {
-        if (block.type !== "tool_use") continue;
-        if (block.name === "finish") {
-          send(tabId, { cmd: "done", cueId, summary: block.input.summary || "Done." });
-          await saveTaskState(cueId, { status: "done", instruction, step, lastResult: block.input.summary || "Done.", tabId });
-          finished = true;
-          break;
-        }
-        const result = await executeAction(tabId, block.input, signal);
-        await saveTaskState(cueId, { status: "running", instruction, step, lastResult: result, tabId });
-        const snap = await snapshotBlocks(tabId, signal);
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: [{ type: "text", text: `Result: ${result}` }, ...snap],
-        });
-      }
-      if (finished) return;
-      messages.push({ role: "user", content: toolResults });
+    if (await maybeApplySettingsChange(tabId, instruction, cfg, signal, cueId)) {
+      return;
     }
-    send(tabId, { cmd: "done", cueId, summary: `Reached the ${MAX_STEPS}-step limit.` });
-    await saveTaskState(cueId, { status: "done", instruction, step: MAX_STEPS, lastResult: `Reached the ${MAX_STEPS}-step limit.`, tabId });
+    await runViaGateway(tabId, instruction, cfg, signal, cueId);
   } catch (err) {
     const message = signal.aborted ? "Task cancelled." : String(err.message || err);
     send(tabId, { cmd: signal.aborted ? "done" : "error", cueId, summary: message, text: message });

@@ -1,7 +1,5 @@
 import { parseSettingsIntent, PROFILE_FIELDS } from "./settings-intent.js";
 
-const keyEl = document.getElementById("key");
-const modelEl = document.getElementById("model");
 const gatewayUrlEl = document.getElementById("gatewayUrl");
 const gatewayTokenEl = document.getElementById("gatewayToken");
 const statusEl = document.getElementById("status");
@@ -22,10 +20,8 @@ const profileStatusEl = document.getElementById("profileStatus");
 const PROFILE_CACHE_KEY = "ageeProfileCache";
 
 chrome.storage.local
-  .get(["ageeApiKey", "ageeModel", "ageeGatewayUrl", "ageeGatewayToken"])
-  .then(({ ageeApiKey, ageeModel, ageeGatewayUrl, ageeGatewayToken }) => {
-    if (ageeApiKey) keyEl.value = ageeApiKey;
-    modelEl.value = ageeModel || "claude-opus-4-8";
+  .get(["ageeGatewayUrl", "ageeGatewayToken"])
+  .then(({ ageeGatewayUrl, ageeGatewayToken }) => {
     if (ageeGatewayUrl) gatewayUrlEl.value = ageeGatewayUrl;
     if (ageeGatewayToken) gatewayTokenEl.value = ageeGatewayToken;
     loadProfile();
@@ -61,8 +57,6 @@ function gatewayHeaders(token, withBody) {
 
 document.getElementById("save").addEventListener("click", async () => {
   await chrome.storage.local.set({
-    ageeApiKey: keyEl.value.trim(),
-    ageeModel: modelEl.value.trim() || "claude-opus-4-8",
     ageeGatewayUrl: normalizeGatewayUrl(gatewayUrlEl.value),
     ageeGatewayToken: gatewayTokenEl.value.trim(),
   });

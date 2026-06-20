@@ -1,6 +1,5 @@
 {
   "_comment": "Committed example. `npm run configure` writes agee.config.json (git-ignored) with the token filled in. The URL is safe to commit; the token is a secret and only ever lives in agee.config.json.",
   "gatewayUrl": "http://10.147.17.10:8788",
-  "gatewayToken": "",
-  "model": "claude-opus-4-8"
+  "gatewayToken": ""
 }
