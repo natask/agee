@@ -24,7 +24,8 @@
     audioCtx = null,
     wanderTimer = null,
     wanderPauseUntil = 0,
-    wanderHover = false;
+    wanderHover = false,
+    historyLoaded = false;
 
   // The overlay's voice surface runs a small state machine so the screen always
   // shows whether the agent is up and what it is doing:
@@ -212,12 +213,43 @@
     root.classList.toggle("agee-open", open);
     if (open) {
       setTimeout(() => input.focus(), 0);
+      loadConversationHistory();
     }
   }
 
-  // No sessions, no history. The overlay shows only the live turns of this page
-  // load. Prior conversation is not fetched or rendered — context belongs to the
-  // agent, not a scrollback the user has to manage.
+  function loadConversationHistory() {
+    if (historyLoaded) return;
+    historyLoaded = true;
+    chrome.runtime.sendMessage({ cmd: "history" }).then((response) => {
+      if (!response?.ok || !Array.isArray(response.turns) || response.turns.length === 0) return;
+      renderHistory(response.turns);
+    }).catch(() => {});
+  }
+
+  function renderHistory(turns) {
+    if (!log || log.childElementCount) return;
+    const recent = turns.slice(-12);
+    for (const turn of recent) {
+      const userText = pickTurnText(turn, ["user", "transcript", "input", "prompt"]);
+      const assistantText = pickTurnText(turn, ["assistant", "display", "text", "reply", "speak"]);
+      if (userText) log.appendChild(makeRow("you", userText));
+      if (assistantText) log.appendChild(makeRow("done", assistantText));
+    }
+    if (log.childElementCount) log.scrollTop = log.scrollHeight;
+  }
+
+  function pickTurnText(turn, fields) {
+    for (const field of fields) {
+      const value = turn?.[field];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    if (Array.isArray(turn?.messages)) {
+      const wanted = fields.includes("user") ? "user" : "assistant";
+      const msg = [...turn.messages].reverse().find((m) => m?.role === wanted && typeof m?.content === "string" && m.content.trim());
+      if (msg) return msg.content.trim();
+    }
+    return "";
+  }
 
   function makeRow(who, text) {
     const row = document.createElement("div");

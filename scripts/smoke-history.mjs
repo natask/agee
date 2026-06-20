@@ -391,7 +391,7 @@ async function main() {
         const log = document.querySelector("#agee-log");
         if (!log) return null;
         const youRows = [...log.querySelectorAll(".agee-row.agee-you")].map((r) => r.textContent || "");
-        const ageeRows = [...log.querySelectorAll(".agee-row.agee-agee")].map((r) => r.textContent || "");
+        const ageeRows = [...log.querySelectorAll(".agee-row.agee-agee, .agee-row.agee-done")].map((r) => r.textContent || "");
         const hasTranscript = youRows.some((t) => t.includes(${JSON.stringify(TRANSCRIPT)}));
         const hasReply = ageeRows.some((t) => t.trim().length > 0);
         return hasTranscript && hasReply

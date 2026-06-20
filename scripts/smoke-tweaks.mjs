@@ -266,12 +266,32 @@ async function main() {
     const finalList = await tweakMsg(workerCdp, "http://localhost/*", { cmd: "tweak:list" });
     assert(finalList.tweaks.length === 0, "no tweaks should remain after removal");
 
+    // 5) OVERLAY COMMAND PATH: the same natural-language command must work
+    // through the normal user surface, not only by sending tweak:* messages.
+    const opened = await tweakMsg(workerCdp, "http://localhost/*", { cmd: "open" });
+    assert(opened.ok, "overlay should open");
+    await evaluate(pageCdp, `
+      (() => {
+        const input = document.getElementById('agee-input');
+        if (!input) throw new Error('no agee input');
+        input.value = 'remove the cookie banner';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        return true;
+      })()
+    `);
+    const hiddenViaOverlay = await waitForEval(pageCdp, `(${BANNER_VISIBLE_EXPR}) === false ? "hidden" : null`);
+    assert(hiddenViaOverlay === "hidden", "overlay command path should apply the tweak");
+    const overlayList = await tweakMsg(workerCdp, "http://localhost/*", { cmd: "tweak:list" });
+    assert(overlayList.tweaks.length === 1, "overlay path should persist one tweak");
+    await tweakMsg(workerCdp, "http://localhost/*", { cmd: "tweak:clear" });
+
     console.log(
       `tweaks smoke passed (REAL extension, headless Chrome for Testing): id=${extensionId}\n` +
         `  apply       -> "hide the cookie banner" built tweak ${tweakId} (kind=hide), banner hidden, css inspectable\n` +
         `  reload      -> tweak PERSISTED + AUTO-RE-APPLIED (style live, banner still hidden)\n` +
         `  per-origin  -> ${otherList.origin} saw 0 tweaks, banner VISIBLE (scope held)\n` +
         `  removal     -> tweak removed + reversible, banner back after reload\n` +
+        `  overlay     -> "remove the cookie banner" through the normal command bar hid + persisted\n` +
         `  no window shown, no focus taken.`,
     );
   } finally {

@@ -190,6 +190,57 @@ async function maybeAnswerProfileQuery(tabId, instruction, cfg, signal, cueId) {
   return true;
 }
 
+// Page tweaks are local-first page customizations, handled by tweaks.js in the
+// content world. This is deliberately before the model turn: bounded CSS tweaks
+// such as "hide the sidebar" should happen immediately, stay inspectable, and
+// persist for this origin without asking a remote model to generate page code.
+async function maybeApplyPageTweak(tabId, instruction, signal, cueId) {
+  const raw = String(instruction || "").trim();
+  if (!looksLikePageTweak(raw)) return false;
+
+  send(tabId, { cmd: "progress", cueId, text: "changing this page…" });
+  await saveTaskState(cueId, { status: "running", instruction, step: 0, lastResult: "applying page tweak", tabId });
+  throwIfAborted(signal);
+
+  let result;
+  try {
+    result = await ask(tabId, { cmd: "tweak:apply", instruction: raw });
+  } catch (error) {
+    send(tabId, { cmd: "error", cueId, text: `Page tweak failed: ${String(error?.message || error)}` });
+    await saveTaskState(cueId, { status: "error", instruction, step: 1, lastResult: String(error?.message || error), tabId });
+    return true;
+  }
+
+  if (!result?.ok) {
+    const message = result?.error || "I can only apply bounded page tweaks right now: hide selectors, hide common page parts, dark mode, readable width, or text size.";
+    send(tabId, { cmd: "done", cueId, summary: message, speak: message });
+    await saveTaskState(cueId, { status: "done", instruction, step: 1, lastResult: message, tabId });
+    return true;
+  }
+
+  const tweak = result.tweak || {};
+  const summary = `Changed this page — ${tweak.label || "page tweak"} is now saved for ${result.origin || "this site"}.`;
+  send(tabId, { cmd: "done", cueId, summary, speak: summary });
+  await saveTaskState(cueId, {
+    status: "done",
+    instruction,
+    step: 1,
+    tabId,
+    lastResult: summary.slice(0, 400),
+    tweakId: tweak.id,
+    tweakKind: tweak.kind,
+  });
+  return true;
+}
+
+function looksLikePageTweak(raw) {
+  if (!raw) return false;
+  return (
+    /\b(hide|remove|get rid of|dismiss|kill)\b/i.test(raw) ||
+    /\b(dark mode|readable|narrow width|make (?:the )?(?:text|font) (?:bigger|larger|smaller))\b/i.test(raw)
+  );
+}
+
 function truncate(text, max) {
   const t = String(text || "");
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
@@ -488,6 +539,9 @@ async function runAgent(tabId, instruction, controller, cueId) {
       return;
     }
     if (await maybeApplySettingsChange(tabId, instruction, cfg, signal, cueId)) {
+      return;
+    }
+    if (await maybeApplyPageTweak(tabId, instruction, signal, cueId)) {
       return;
     }
     const browserTask = parseBrowserTaskIntent(instruction);
@@ -833,8 +887,13 @@ async function captureAmbientFrame() {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // No sessions: the overlay never asks for prior history. (loadHistory remains
-  // available to the gateway plumbing but is no longer wired to the surface.)
+  if (msg.cmd === "history") {
+    getConfig()
+      .then((cfg) => loadHistory(cfg))
+      .then((turns) => sendResponse({ ok: true, turns }))
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error), turns: [] }));
+    return true;
+  }
   if (msg.cmd === "run" && sender.tab) {
     const tabId = sender.tab.id;
     const cueId = nextCueId(msg.cueId);

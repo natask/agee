@@ -17,7 +17,7 @@
       "run_at": "document_idle"
     },
     {
-      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "matches": ["<all_urls>"],
       "js": ["tweaks.js"],
       "run_at": "document_start"
     }
