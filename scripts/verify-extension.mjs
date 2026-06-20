@@ -55,6 +55,8 @@ for (const file of [
   "scripts/smoke-extension.mjs",
   "scripts/smoke-gateway.mjs",
   "scripts/smoke-settings.mjs",
+  "scripts/smoke-cdp.mjs",
+  "scripts/smoke-integration.mjs",
   "scripts/chrome-for-testing.mjs",
 ]) {
   execFileSync(process.execPath, ["--check", file], { stdio: "inherit" });

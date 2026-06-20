@@ -244,8 +244,10 @@
   function updateCue(cueId, text, kind) {
     const entry = cues.get(cueId);
     // A message for an unknown cue (e.g. server-generated id) falls back to a row.
+    // Tag the terminal kind so a done row is distinguishable from interim
+    // progress rows (error -> agee-error, done -> agee-done, running -> agee-agee).
     if (!entry) {
-      addLog(kind === "error" ? "error" : "agee", text);
+      addLog(kind === "error" ? "error" : kind === "done" ? "done" : "agee", text);
       if (kind === "done" || kind === "error") {
         lastTerminal = kind;
         refreshStatus();

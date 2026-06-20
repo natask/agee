@@ -111,6 +111,39 @@ async function gatewayHealth(cfg, signal) {
   return callGateway(cfg, "/health", { method: "GET", signal });
 }
 
+// ---- Router activation loop (the gateway side of a branch) -----------------
+// The sterile router on the gateway launches a disposable agent run and never
+// speaks. We POST the intent to /v1/router/activate (202 + run id), then poll
+// /v1/router/activations/:id for the durable router_ping the gateway emits on
+// completion. This is the loop the integration fuses to the CDP task agent: the
+// gateway tracks + pings the run, the browser does the actual page work.
+//
+// `parentRunId` threads fan-out lineage so two concurrent activations share a
+// parent. The harness/echo output stays a proposal — we only render its summary.
+async function routerActivate(cfg, { intent, screen, parentRunId, signal }) {
+  const body = { intent, source: "agee-extension" };
+  if (screen) body.screen = screen;
+  if (parentRunId) body.parent_run_id = parentRunId;
+  const activation = await callGateway(cfg, "/v1/router/activate", { signal, body });
+  const runId = activation && (activation.run_id || activation.activation_id);
+  if (!runId) throw new Error("router activate returned no run id");
+  return { runId, statusUrl: activation.status_url || `/v1/router/activations/${runId}` };
+}
+
+// Poll a router activation until its durable router_ping appears (or timeout).
+// Returns the ping event { type:"router_ping", ok, run_status, summary, ... }.
+async function waitForRouterPing(cfg, runId, signal, { timeoutMs = 12000, intervalMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+    last = await callGateway(cfg, `/v1/router/activations/${runId}`, { method: "GET", signal });
+    if (last && last.ping) return last.ping;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`router activation ${runId} did not ping in time`);
+}
+
 // ---- Runtime agent profile (the settings the agent reads/writes) ----------
 // Cache key shared with the options page so a change applied here refreshes an
 // open settings surface live (chrome.storage.onChanged).
@@ -644,7 +677,15 @@ async function waitForBackgroundTabLoad(tabId, timeoutMs = 8000) {
 // Run one disposable task agent in its own background tab. `overlayTabId` is the
 // user's foreground tab whose overlay shows the cue; `instruction`/`url` come
 // from the {cmd:"branch"} intent. Never activates the background tab.
-async function runBranchTaskAgent(overlayTabId, instruction, url, controller, cueId) {
+//
+// `opts.parentRunId` (optional) threads fan-out lineage so concurrent workers in
+// one BRANCH-TO-TWO trigger share a gateway parent. When a gateway is configured
+// we ALSO register a router activation for this worker: the gateway launches its
+// disposable agent run, tracks it, and emits a durable router_ping the overlay
+// renders. The CDP browser work and the gateway activation run concurrently; the
+// gateway's harness output is a proposal we summarize, never an executable
+// command.
+async function runBranchTaskAgent(overlayTabId, instruction, url, controller, cueId, opts = {}) {
   const signal = controller.signal;
   let bgTabId = null;
   let attached = false;
@@ -668,6 +709,27 @@ async function runBranchTaskAgent(overlayTabId, instruction, url, controller, cu
     await saveTaskState(cueId, { status: "running", instruction, step: 0, lastResult: "launching background task agent", tabId: overlayTabId });
     send(overlayTabId, { cmd: "progress", cueId, text: "launching background agent…" });
     throwIfAborted(signal);
+
+    // Fuse the two PoCs: if a gateway is configured, register a router activation
+    // for this worker. The gateway launches + tracks a disposable run and emits a
+    // durable router_ping; we poll for it CONCURRENTLY with the CDP browser work
+    // below so neither blocks the other. Best-effort: a gateway hiccup must not
+    // sink the local browser task.
+    const cfg = await getConfig();
+    let routerPromise = null;
+    let routerRunId = null;
+    if (cfg.gatewayUrl) {
+      routerPromise = (async () => {
+        const { runId } = await routerActivate(cfg, {
+          intent: instruction,
+          parentRunId: opts.parentRunId,
+          signal,
+        });
+        routerRunId = runId;
+        await saveTaskState(cueId, { status: "running", instruction, routerRunId: runId, tabId: overlayTabId });
+        return waitForRouterPing(cfg, runId, signal);
+      })().catch((err) => ({ error: String(err?.message || err) }));
+    }
 
     // Disposable background tab — the agent's own surface. active:false is the
     // whole contract: it must never steal the user's focus.
@@ -729,16 +791,32 @@ async function runBranchTaskAgent(overlayTabId, instruction, url, controller, cu
       // tab already gone — treat as background (it was never surfaced)
     }
 
+    // Await the gateway router_ping (if we started one) so the overlay reflects
+    // both sides of the fused loop: the CDP browser work AND the durable router
+    // ping. The ping summary is a proposal we render, never executed.
+    let routerPing = null;
+    if (routerPromise) {
+      send(overlayTabId, { cmd: "progress", cueId, text: "awaiting router ping…" });
+      routerPing = await routerPromise;
+    }
+
     const title = pageState.title || "(untitled)";
-    const summary =
+    let summary =
       `Background task agent done — opened "${title}", captured ${Math.round(screenshotBytes / 1024)}KB screenshot, ` +
       `dispatched 1 input event${stayedBackground ? ", tab stayed in background." : " (warning: tab became active)."}`;
+    if (routerPing && !routerPing.error && routerPing.summary) {
+      summary += ` Router ping: ${truncate(String(routerPing.summary), 160)}`;
+    } else if (routerPing && routerPing.error) {
+      summary += ` (router ping unavailable: ${truncate(routerPing.error, 120)})`;
+    }
     send(overlayTabId, { cmd: "done", cueId, summary });
     await saveTaskState(cueId, {
       status: "done",
       instruction,
       step: 1,
       tabId: overlayTabId,
+      routerRunId,
+      routerPingOk: Boolean(routerPing && !routerPing.error && routerPing.ok),
       lastResult: summary.slice(0, 400),
     });
   } catch (err) {
@@ -756,6 +834,43 @@ async function runBranchTaskAgent(overlayTabId, instruction, url, controller, cu
       }
     }
     if (tasks.get(cueId)?.controller === controller) tasks.delete(cueId);
+  }
+}
+
+// BRANCH-TO-TWO (the headline): one trigger fans out to N disposable task
+// agents that run CONCURRENTLY, each in its OWN background tab with its OWN cue.
+// Neither steals focus; each pings independently on completion; each registers
+// its own gateway router activation under a shared parent run, so the gateway
+// records one router_ping per worker.
+//
+// `branches` is an array of { instruction, url, cueId }. We start every worker
+// in the same tick (no awaiting between launches) so they are genuinely
+// in-flight together, then let each finish on its own lane.
+async function runBranchFanout(overlayTabId, branches, controllersByCue) {
+  // A shared parent gateway run ties the fan-out together as lineage. Best-effort:
+  // if the gateway is down or unset, the workers still run locally.
+  let parentRunId = null;
+  try {
+    const cfg = await getConfig();
+    if (cfg.gatewayUrl) {
+      const parent = await routerActivate(cfg, {
+        intent: `fan-out: ${branches.length} concurrent task agents`,
+        signal: undefined,
+      });
+      parentRunId = parent.runId;
+    }
+  } catch {
+    parentRunId = null; // lineage is a nicety, not a requirement
+  }
+
+  // Launch every worker without awaiting between them: they share this tick and
+  // are therefore concurrently in flight.
+  for (const branch of branches) {
+    const controller = controllersByCue.get(branch.cueId);
+    if (!controller) continue;
+    runBranchTaskAgent(overlayTabId, branch.instruction, branch.url, controller, branch.cueId, {
+      parentRunId,
+    });
   }
 }
 
@@ -791,6 +906,20 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     const controller = new AbortController();
     tasks.set(cueId, { controller, tabId: overlayTabId });
     runBranchTaskAgent(overlayTabId, msg.instruction, msg.url, controller, cueId);
+  }
+  if (msg.cmd === "branchFanout" && sender.tab && Array.isArray(msg.branches)) {
+    // BRANCH-TO-TWO: one trigger, N concurrent disposable task agents, each its
+    // own background tab + own cue + own gateway router activation.
+    const overlayTabId = sender.tab.id;
+    const controllersByCue = new Map();
+    const branches = msg.branches.map((b) => {
+      const cueId = nextCueId(b.cueId);
+      const controller = new AbortController();
+      tasks.set(cueId, { controller, tabId: overlayTabId });
+      controllersByCue.set(cueId, controller);
+      return { instruction: b.instruction, url: b.url, cueId };
+    });
+    runBranchFanout(overlayTabId, branches, controllersByCue);
   }
   if (msg.cmd === "describe" && sender.tab) {
     const tabId = sender.tab.id;
