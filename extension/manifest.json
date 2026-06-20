@@ -3,7 +3,7 @@
   "name": "agee",
   "version": "0.1.0",
   "description": "Open-source browser agent. Double-tap ⌘ to talk, ⌘. to type. Pipes to your self-hosted gateway. It sees your page and acts in it.",
-  "permissions": ["activeTab", "tabs", "scripting", "storage", "debugger"],
+  "permissions": ["activeTab", "tabs", "scripting", "storage", "debugger", "alarms"],
   "host_permissions": ["http://localhost/*", "http://10.147.17.10/*", "http://10.147.17.6/*"],
   "background": {
     "service_worker": "background.js",

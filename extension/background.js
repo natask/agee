@@ -48,6 +48,9 @@ async function callGateway(cfg, path, { method = "POST", body, signal } = {}) {
     }
     throw new Error(`gateway ${resp.status}: ${text.slice(0, 300)}`);
   }
+  if (resp.status === 204 || !text.trim()) {
+    return null;
+  }
   try {
     return JSON.parse(text);
   } catch {
@@ -58,6 +61,197 @@ async function callGateway(cfg, path, { method = "POST", body, signal } = {}) {
 async function gatewayHealth(cfg, signal) {
   return callGateway(cfg, "/health", { method: "GET", signal });
 }
+
+// ---- Gateway-queued browser tasks -----------------------------------------
+// Gemini Live can queue browser work on the gateway. The extension is the only
+// component allowed to execute page-local CDP actions, so it claims tasks here,
+// runs bounded debugger actions in a disposable background tab, then posts a
+// receipt back to the gateway.
+const BROWSER_TASK_CLIENT_ID = `agee-extension-${chrome.runtime.id}`;
+const BROWSER_TASK_POLL_MS = 2000;
+let browserTaskPollInFlight = false;
+let browserTaskPollTimer = null;
+
+function startBrowserTaskPolling() {
+  if (!chrome?.storage?.local || !chrome?.alarms || !chrome?.debugger || !chrome?.tabs) return;
+  if (browserTaskPollTimer) return;
+  browserTaskPollTimer = setInterval(() => {
+    pollBrowserTasks().catch(() => {});
+  }, BROWSER_TASK_POLL_MS);
+  chrome.alarms.create("agee-browser-task-poll", { periodInMinutes: 0.5 });
+  pollBrowserTasks().catch(() => {});
+}
+
+async function pollBrowserTasks() {
+  if (browserTaskPollInFlight) return;
+  browserTaskPollInFlight = true;
+  try {
+    const cfg = await getConfig();
+    if (!cfg.gatewayUrl) return;
+    const claimed = await callGateway(cfg, "/v1/browser/tasks/claim", {
+      body: { client_id: BROWSER_TASK_CLIENT_ID },
+    });
+    const task = claimed?.task;
+    if (!task?.id) return;
+    const receipt = await executeGatewayBrowserTask(task);
+    await callGateway(cfg, `/v1/browser/tasks/${encodeURIComponent(task.id)}/receipts`, {
+      body: {
+        client_id: BROWSER_TASK_CLIENT_ID,
+        ...receipt,
+      },
+    });
+  } catch {
+    // Polling is background infrastructure; individual task failures are
+    // reported as receipts when a task was claimed.
+  } finally {
+    browserTaskPollInFlight = false;
+  }
+}
+
+async function executeGatewayBrowserTask(task) {
+  let bgTabId = null;
+  let attached = false;
+  const target = {};
+  const actionResults = [];
+  let screenshot = null;
+  let pageState = null;
+  try {
+    const startUrl = await browserTaskStartUrl(task);
+    const bgTab = await chrome.tabs.create({ url: "about:blank", active: false });
+    bgTabId = bgTab.id;
+    target.tabId = bgTabId;
+    await debuggerAttach(target);
+    attached = true;
+    await debuggerSend(target, "Page.enable");
+    await debuggerSend(target, "Runtime.enable");
+
+    if (startUrl) {
+      await debuggerSend(target, "Page.navigate", { url: startUrl });
+      await waitForBackgroundTabLoad(bgTabId);
+    }
+
+    const actions = Array.isArray(task.cdp_actions) && task.cdp_actions.length
+      ? task.cdp_actions
+      : defaultBrowserTaskActions(task);
+
+    for (const action of actions) {
+      const method = String(action?.method || "");
+      const params = action?.params && typeof action.params === "object" ? action.params : {};
+      if (!isAllowedQueuedCdpMethod(method)) {
+        actionResults.push({ method, ok: false, error: "blocked CDP method" });
+        continue;
+      }
+      try {
+        const result = await debuggerSend(target, method, params);
+        if (method === "Page.navigate") {
+          await waitForBackgroundTabLoad(bgTabId);
+        }
+        if (method === "Page.captureScreenshot") {
+          screenshot = { format: params.format || "png", bytes: result?.data ? result.data.length : 0 };
+        }
+        actionResults.push({ method, ok: true, value: compactCdpResult(result) });
+      } catch (error) {
+        actionResults.push({ method, ok: false, error: String(error?.message || error) });
+      }
+    }
+
+    pageState = await readCdpPageState(target);
+    if (!screenshot) {
+      const shot = await debuggerSend(target, "Page.captureScreenshot", { format: "jpeg", quality: 35 });
+      screenshot = { format: "jpeg", bytes: shot?.data ? shot.data.length : 0 };
+    }
+
+    const title = pageState?.title || "(untitled)";
+    return {
+      ok: actionResults.every((result) => result.ok !== false),
+      summary: `Browser task completed in background tab: ${title}`,
+      action_results: actionResults,
+      page_state: pageState,
+      screenshot,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: String(error?.message || error),
+      summary: "Browser task failed in extension CDP executor.",
+      action_results: actionResults,
+      page_state: pageState,
+      screenshot,
+    };
+  } finally {
+    if (attached) await debuggerDetach(target);
+    if (bgTabId != null) {
+      try {
+        await chrome.tabs.remove(bgTabId);
+      } catch {
+        // already gone
+      }
+    }
+  }
+}
+
+async function browserTaskStartUrl(task) {
+  const explicit = allowedBrowserTaskUrl(task?.url);
+  if (explicit) return explicit;
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  return allowedBrowserTaskUrl(active?.url);
+}
+
+function allowedBrowserTaskUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return ALLOWED_NAVIGATION_PROTOCOLS.has(url.protocol) ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function defaultBrowserTaskActions() {
+  return [
+    { method: "Runtime.evaluate", params: { expression: "JSON.stringify({ title: document.title, url: location.href, ready: document.readyState })", returnByValue: true } },
+    { method: "Page.captureScreenshot", params: { format: "jpeg", quality: 40 } },
+  ];
+}
+
+function isAllowedQueuedCdpMethod(method) {
+  return method === "Page.navigate" ||
+    method === "Runtime.evaluate" ||
+    method === "Input.dispatchKeyEvent" ||
+    method === "Input.insertText" ||
+    method === "Page.captureScreenshot";
+}
+
+function compactCdpResult(result) {
+  if (!result || typeof result !== "object") return null;
+  if (result.data) {
+    return { data_bytes: String(result.data).length };
+  }
+  if (result.result?.value != null) {
+    return result.result.value;
+  }
+  return JSON.stringify(result).slice(0, 1000);
+}
+
+async function readCdpPageState(target) {
+  const evalRes = await debuggerSend(target, "Runtime.evaluate", {
+    expression: "JSON.stringify({ title: document.title, url: location.href, ready: document.readyState })",
+    returnByValue: true,
+  });
+  try {
+    return JSON.parse(evalRes?.result?.value || "{}");
+  } catch {
+    return {};
+  }
+}
+
+if (chrome?.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === "agee-browser-task-poll") {
+      pollBrowserTasks().catch(() => {});
+    }
+  });
+}
+startBrowserTaskPolling();
 
 // ---- Router activation loop (the gateway side of a branch) -----------------
 // The sterile router on the gateway launches a disposable agent run and never

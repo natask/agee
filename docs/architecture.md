@@ -161,6 +161,19 @@ Next hardening step:
 
 This loop is experimental capability. The product frame remains a browser-native interface that can host multiple workflows, not an autonomous browser agent whose default behavior is to take over tabs.
 
+## Gateway-Queued Browser Tasks
+
+Gemini Live and other gateway agents can enqueue browser work as durable
+`/v1/browser/tasks` records. The extension polls `/v1/browser/tasks/claim`,
+claims one pending task at a time, executes allowlisted Chrome DevTools Protocol
+methods through `chrome.debugger` in a disposable background tab, and posts a
+receipt to `/v1/browser/tasks/:id/receipts`.
+
+The gateway stores the request, claim, and receipt; the extension owns the actual
+browser-side execution. A receipt includes compact action results, page state,
+and screenshot metadata. Raw provider keys stay out of the browser, and raw
+screenshot payloads are not posted back in receipts.
+
 ## Security Rules
 
 - Never execute model-generated JavaScript.
@@ -173,6 +186,8 @@ This loop is experimental capability. The product frame remains a browser-native
 - Block non-HTTP(S) navigation.
 - Confirm cross-origin navigation.
 - Reject concurrent tasks in the same tab.
+- Execute gateway-queued CDP tasks only through the allowlisted method set and
+  always return a receipt.
 - Treat screenshots and prompts as sensitive user data.
 - Use `activeTab` and explicit user invocation instead of broad all-sites background access.
 

@@ -15,15 +15,21 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
+import net from "node:net";
 import { join, resolve } from "node:path";
 import { resolveChromeForTesting, quietChromeArgs } from "./chrome-for-testing.mjs";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
+const repoRoot = resolve(root, "..", "..");
+const gatewayDir = join(repoRoot, "software", "moa_gateway");
 const extensionPath = join(root, "extension");
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const runDir = join(root, ".gstack", "background-qa", `smoke-cdp-${runId}`);
 const profilePath = join(runDir, "chrome-profile");
+const gatewayDataDir = join(runDir, "gateway-data");
+const TOKEN = "cdp-smoke-token";
 let latestChromeStderr = "";
+let latestGatewayStderr = "";
 
 function serve() {
   const server = createServer((req, res) => {
@@ -49,6 +55,64 @@ function serve() {
 
 function delay(ms) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+async function freePort() {
+  return new Promise((resolveFreePort, rejectFreePort) => {
+    const server = net.createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const port = server.address().port;
+      server.close(() => resolveFreePort(port));
+    });
+    server.on("error", rejectFreePort);
+  });
+}
+
+async function startGateway() {
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  mkdirSync(gatewayDataDir, { recursive: true });
+  const gateway = spawn(process.execPath, ["server.js"], {
+    cwd: gatewayDir,
+    env: {
+      PATH: process.env.PATH || "",
+      HOME: process.env.HOME || "",
+      TMPDIR: process.env.TMPDIR || "",
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      DATA_DIR: gatewayDataDir,
+      MOA_GATEWAY_TOKEN: TOKEN,
+      DEFAULT_AGENT_HARNESS: "echo",
+      MODEL_API_KEY: "",
+      OPENAI_API_KEY: "",
+      GOOGLE_API_KEY: "",
+      GEMINI_API_KEY: "",
+      VERTEX_PROJECT: "",
+      GOOGLE_CLOUD_PROJECT: "",
+      GOOGLE_APPLICATION_CREDENTIALS: "",
+      VERTEX_ACCESS_TOKEN: "",
+      HARNESS_STATUS_TIMEOUT_MS: "200",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const append = (chunk) => {
+    latestGatewayStderr += chunk.toString();
+    latestGatewayStderr = latestGatewayStderr.slice(-4000);
+  };
+  gateway.stdout.on("data", append);
+  gateway.stderr.on("data", append);
+  const started = Date.now();
+  while (Date.now() - started < 10000) {
+    try {
+      const resp = await fetch(`${baseUrl}/health`);
+      if (resp.ok) return { gateway, baseUrl };
+    } catch {
+      // not ready
+    }
+    await delay(100);
+  }
+  gateway.kill("SIGTERM");
+  throw new Error(`local gateway did not become healthy on ${baseUrl}.\n${latestGatewayStderr}`);
 }
 
 async function waitForFile(path, timeoutMs = 15000) {
@@ -136,6 +200,22 @@ async function waitForEval(cdp, expression, timeoutMs = 15000) {
   throw new Error(`Timed out waiting for expression: ${expression}; last=${JSON.stringify(lastValue)}`);
 }
 
+async function waitForGatewayTask(baseUrl, taskId, timeoutMs = 20000) {
+  const started = Date.now();
+  let lastTask = null;
+  while (Date.now() - started < timeoutMs) {
+    const body = await fetch(`${baseUrl}/v1/browser/tasks?limit=20`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    }).then((resp) => resp.json());
+    lastTask = (body.tasks || []).find((task) => task.id === taskId) || null;
+    if (lastTask?.status === "completed" || lastTask?.status === "failed") {
+      return lastTask;
+    }
+    await delay(250);
+  }
+  throw new Error(`Timed out waiting for gateway browser task ${taskId}; last=${JSON.stringify(lastTask)}`);
+}
+
 async function main() {
   const chromePath = resolveChromeForTesting();
   const { server, port: serverPort } = await serve();
@@ -154,7 +234,9 @@ async function main() {
   let browserCdp;
   let workerCdp;
   let pageCdp;
+  let gateway;
   try {
+    gateway = await startGateway();
     const devToolsPort = Number((await waitForFile(join(profilePath, "DevToolsActivePort"))).split("\n")[0]);
 
     // The agee service worker target is the proof the REAL extension loaded.
@@ -191,6 +273,10 @@ async function main() {
     // path) and via the overlay root it injects into the shared page DOM.
     workerCdp = new Cdp(workerTarget.webSocketDebuggerUrl);
     await workerCdp.send("Runtime.enable");
+    await evaluate(workerCdp, `chrome.storage.local.set(${JSON.stringify({
+      ageeGatewayUrl: gateway.baseUrl,
+      ageeGatewayToken: TOKEN,
+    })}).then(() => true)`);
     const ping = await waitForEval(workerCdp, `
       (async () => {
         const [tab] = await chrome.tabs.query({ url: "http://localhost/*" });
@@ -284,11 +370,48 @@ async function main() {
       throw new Error("overlay tab was navigated by the task agent (focus/ownership violation)");
     }
 
+    const queued = await fetch(`${gateway.baseUrl}/v1/browser/tasks`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        source: "smoke-cdp",
+        instruction: "inspect queued browser task page",
+        url: branchUrl,
+        cdp_actions: [
+          {
+            method: "Runtime.evaluate",
+            params: {
+              expression: "document.title",
+              returnByValue: true,
+            },
+          },
+          {
+            method: "Page.captureScreenshot",
+            params: {
+              format: "jpeg",
+              quality: 35,
+            },
+          },
+        ],
+      }),
+    }).then((resp) => resp.json());
+    const queuedId = queued?.task?.id;
+    if (!queuedId) {
+      throw new Error(`gateway did not create queued browser task: ${JSON.stringify(queued)}`);
+    }
+    const completedTask = await waitForGatewayTask(gateway.baseUrl, queuedId);
+    if (completedTask.status !== "completed" || !completedTask.latest_receipt?.ok) {
+      throw new Error(`queued browser task did not complete with ok receipt: ${JSON.stringify(completedTask)}`);
+    }
+
     console.log(
       "CDP task-agent smoke passed (REAL extension, headless Chrome for Testing): " +
         `service worker id=${extensionId}; background task agent opened its own tab, captured a screenshot, ` +
         "dispatched 1 input event, stayed in background, then disposed the tab; " +
-        `overlay rendered the done cue; pages baseline=${pagesBefore} after=${pagesAfter}; ` +
+        `overlay rendered the done cue; queued gateway task ${queuedId} completed with a receipt; pages baseline=${pagesBefore} after=${pagesAfter}; ` +
         "no window shown, no focus taken.",
     );
     console.log(`done cue: "${doneText}"`);
@@ -297,6 +420,7 @@ async function main() {
     workerCdp?.close();
     browserCdp?.close();
     server.close();
+    gateway?.gateway?.kill("SIGTERM");
     chrome.kill("SIGTERM");
     await delay(300);
     rmSync(runDir, { recursive: true, force: true });
@@ -308,6 +432,10 @@ main().catch((error) => {
   if (latestChromeStderr.trim()) {
     console.error("Chrome stderr tail:");
     console.error(latestChromeStderr.trim());
+  }
+  if (latestGatewayStderr.trim()) {
+    console.error("Gateway output tail:");
+    console.error(latestGatewayStderr.trim());
   }
   process.exit(1);
 });
