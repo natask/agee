@@ -20,7 +20,17 @@
 
 // Profile fields the gateway accepts. Kept aligned with moa_gateway's
 // lib/agent-profile.js PROFILE_FIELDS; we never invent field names.
-const PROFILE_FIELDS = ["system_prompt", "model", "temperature", "voice_max_chars", "language"];
+const PROFILE_FIELDS = ["system_prompt", "model", "temperature", "voice_max_chars", "language", "voice"];
+
+// The Gemini Live core-8 voices the gateway accepts for the agent's OWN spoken
+// voice. Kept aligned with moa_gateway's lib/agent-profile.js CORE_VOICES. Google
+// labels these by style, not gender, so WE define the gender aliases below.
+const CORE_VOICES = ["Puck", "Charon", "Kore", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"];
+const CORE_VOICES_BY_LOWER = new Map(CORE_VOICES.map((name) => [name.toLowerCase(), name]));
+// Gender aliases we define (the gateway has no gender concept): a woman's voice
+// maps to Aoede, a man's voice to Charon.
+const FEMALE_VOICE = "Aoede";
+const MALE_VOICE = "Charon";
 
 const DEFAULT_VOICE_MAX_CHARS = 280;
 const TERSE_MAX_CHARS = 140;
@@ -85,6 +95,51 @@ function matchLanguage(raw) {
   return { patch: { language: value }, summary: `language set to ${value}` };
 }
 
+// Change the agent's OWN spoken voice. Three shapes, in priority order:
+//   - gender alias:  "female"/"woman"/"sound like a woman" -> Aoede;
+//                    "male"/"man"/"sound like a man"        -> Charon.
+//   - explicit name: "use the Charon voice", "use voice Leda", "switch to Kore",
+//                    "set voice to Aoede" -> that core-8 voice (case-insensitive).
+// Anchored on the word "voice" or an explicit "sound like a man/woman" so it
+// never swallows ordinary system-prompt text.
+function matchVoice(raw) {
+  // Explicit core-voice by name wins when a real voice name is present, so
+  // "use the Charon voice" picks Charon rather than the male alias.
+  const named =
+    raw.match(/\b(?:use|set|change|switch(?:\s+to)?|make)\b[^.]*?\bvoice\b\s*(?:to|=|:|should be|is|named|called)?\s*([a-zA-Z]+)/i) ||
+    raw.match(/\b(?:use|switch\s+to)\s+(?:the\s+)?([a-zA-Z]+)\s+voice\b/i) ||
+    raw.match(/\b(?:use|set|switch\s+to)\s+voice\s+([a-zA-Z]+)/i);
+  if (named) {
+    const canonical = CORE_VOICES_BY_LOWER.get(stripQuotes(named[1].trim()).toLowerCase());
+    if (canonical) {
+      return { patch: { voice: canonical }, summary: `voice set to ${canonical}` };
+    }
+  }
+
+  // "switch to Kore" / "use Aoede" — a bare core-voice name after a switch verb,
+  // with no "voice" word. Safe because we only accept the fixed core-8 names.
+  const bare = raw.match(/\b(?:switch\s+to|use|set|change\s+to|sound\s+like)\s+(?:the\s+|a\s+|an\s+)?([a-zA-Z]+)\b/i);
+  if (bare) {
+    const canonical = CORE_VOICES_BY_LOWER.get(stripQuotes(bare[1].trim()).toLowerCase());
+    if (canonical) {
+      return { patch: { voice: canonical }, summary: `voice set to ${canonical}` };
+    }
+  }
+
+  // Gender aliases: only fire when the request is clearly about the voice/sound,
+  // not any incidental mention of "woman"/"man".
+  const aboutVoice = /\bvoice\b/i.test(raw) || /\bsound\s+like\b/i.test(raw) || /\bspeak\s+like\b/i.test(raw);
+  if (aboutVoice) {
+    if (/\b(female|woman|girl|feminine|lady)\b/i.test(raw)) {
+      return { patch: { voice: FEMALE_VOICE }, summary: `voice set to ${FEMALE_VOICE}` };
+    }
+    if (/\b(male|man|guy|masculine|boy)\b/i.test(raw)) {
+      return { patch: { voice: MALE_VOICE }, summary: `voice set to ${MALE_VOICE}` };
+    }
+  }
+  return null;
+}
+
 // Relative terseness: "be terser", "be more concise", "shorter replies".
 function matchTerser(raw, current) {
   if (!/\b(terser|more\s+terse|be\s+terse|more\s+concise|be\s+concise|shorter|be\s+brief|more\s+brief|less\s+wordy)/i.test(raw)) {
@@ -112,7 +167,10 @@ function matchVerbose(raw, current) {
 const MATCHERS = [
   matchModel,
   matchTemperature,
+  // matchVoiceMaxChars before matchVoice so "voice max chars to 200" sets the
+  // length limit, not the spoken voice.
   matchVoiceMaxChars,
+  matchVoice,
   matchLanguage,
   matchTerser,
   matchVerbose,

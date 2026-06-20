@@ -11,6 +11,7 @@
     "smoke:tweaks": "node scripts/smoke-tweaks.mjs",
     "smoke:gateway": "node scripts/smoke-gateway.mjs",
     "smoke:settings": "node scripts/smoke-settings.mjs",
+    "smoke:voice": "node scripts/smoke-voice.mjs",
     "smoke:history": "node scripts/smoke-history.mjs",
     "verify": "node scripts/verify-extension.mjs"
   }
