@@ -579,6 +579,186 @@ async function runAgent(tabId, instruction, controller, cueId) {
   }
 }
 
+// ---- CDP task agent (router → disposable background-tab agent) -------------
+// The product framing: a sterile router launches N disposable task agents, each
+// driving its OWN background tab via chrome.debugger (Chrome DevTools Protocol).
+// This is the minimal verifiable spike of ONE such agent: open a background tab
+// (active:false, no focus steal), attach the debugger, navigate + screenshot +
+// one input event + read a little page state over CDP, detach, dispose the tab,
+// and ping the overlay "done" on the cue path the rest of the extension uses.
+//
+// Trust boundary: this drives a browser tab; it touches NO API keys and makes
+// NO model calls. The instruction is a label for the disposable run, not an
+// executable command.
+
+const CDP_PROTOCOL_VERSION = "1.3";
+
+function debuggerAttach(target) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach(target, CDP_PROTOCOL_VERSION, () => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(err.message));
+      else resolve();
+    });
+  });
+}
+
+function debuggerDetach(target) {
+  return new Promise((resolve) => {
+    try {
+      chrome.debugger.detach(target, () => {
+        void chrome.runtime.lastError; // tolerate already-detached / gone tab
+        resolve();
+      });
+    } catch {
+      resolve();
+    }
+  });
+}
+
+function debuggerSend(target, method, params = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.sendCommand(target, method, params, (result) => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(`${method}: ${err.message}`));
+      else resolve(result || {});
+    });
+  });
+}
+
+// Wait until the background tab reports a non-loading state, or time out. We
+// avoid focusing the tab; we only poll its status via chrome.tabs.get.
+async function waitForBackgroundTabLoad(tabId, timeoutMs = 8000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") return;
+    } catch {
+      return; // tab gone
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
+// Run one disposable task agent in its own background tab. `overlayTabId` is the
+// user's foreground tab whose overlay shows the cue; `instruction`/`url` come
+// from the {cmd:"branch"} intent. Never activates the background tab.
+async function runBranchTaskAgent(overlayTabId, instruction, url, controller, cueId) {
+  const signal = controller.signal;
+  let bgTabId = null;
+  let attached = false;
+  const target = {};
+  const navUrl = (() => {
+    try {
+      const u = new URL(url);
+      return ALLOWED_NAVIGATION_PROTOCOLS.has(u.protocol) ? u.href : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  try {
+    if (!navUrl) {
+      send(overlayTabId, { cmd: "error", cueId, text: `branch: blocked or invalid url: ${url}` });
+      await saveTaskState(cueId, { status: "error", instruction, lastResult: `invalid url ${url}`, tabId: overlayTabId });
+      return;
+    }
+
+    await saveTaskState(cueId, { status: "running", instruction, step: 0, lastResult: "launching background task agent", tabId: overlayTabId });
+    send(overlayTabId, { cmd: "progress", cueId, text: "launching background agent…" });
+    throwIfAborted(signal);
+
+    // Disposable background tab — the agent's own surface. active:false is the
+    // whole contract: it must never steal the user's focus.
+    const bgTab = await chrome.tabs.create({ url: "about:blank", active: false });
+    bgTabId = bgTab.id;
+    target.tabId = bgTabId;
+
+    // One debugger client per tab: attach can fail (e.g. DevTools already
+    // attached). Emit an error cue instead of throwing.
+    try {
+      await debuggerAttach(target);
+      attached = true;
+    } catch (err) {
+      send(overlayTabId, { cmd: "error", cueId, text: `branch: could not attach debugger (${err.message})` });
+      await saveTaskState(cueId, { status: "error", instruction, lastResult: `attach failed: ${err.message}`, tabId: overlayTabId });
+      return;
+    }
+
+    throwIfAborted(signal);
+    await debuggerSend(target, "Page.enable");
+    await debuggerSend(target, "Runtime.enable");
+
+    send(overlayTabId, { cmd: "progress", cueId, text: "navigating background tab…" });
+    await debuggerSend(target, "Page.navigate", { url: navUrl });
+    await waitForBackgroundTabLoad(bgTabId);
+    throwIfAborted(signal);
+
+    // Capture a screenshot of the BACKGROUND tab over CDP (no foreground capture,
+    // so the user's visible tab is untouched).
+    send(overlayTabId, { cmd: "progress", cueId, text: "capturing background screenshot…" });
+    const shot = await debuggerSend(target, "Page.captureScreenshot", { format: "jpeg", quality: 40 });
+    const screenshotBytes = shot?.data ? shot.data.length : 0;
+    if (!screenshotBytes) throw new Error("background screenshot capture returned no data");
+
+    // Dispatch exactly ONE input event into the background tab. A keyboard event
+    // is enough to prove we can drive input over CDP without focusing the tab.
+    throwIfAborted(signal);
+    await debuggerSend(target, "Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    await debuggerSend(target, "Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+
+    // Read a little page state back over CDP.
+    const evalRes = await debuggerSend(target, "Runtime.evaluate", {
+      expression: "JSON.stringify({ title: document.title, url: location.href, ready: document.readyState })",
+      returnByValue: true,
+    });
+    let pageState = {};
+    try {
+      pageState = JSON.parse(evalRes?.result?.value || "{}");
+    } catch {
+      pageState = {};
+    }
+
+    // Confirm the background tab never became active (focus contract).
+    let stayedBackground = true;
+    try {
+      const finalTab = await chrome.tabs.get(bgTabId);
+      stayedBackground = finalTab.active === false;
+    } catch {
+      // tab already gone — treat as background (it was never surfaced)
+    }
+
+    const title = pageState.title || "(untitled)";
+    const summary =
+      `Background task agent done — opened "${title}", captured ${Math.round(screenshotBytes / 1024)}KB screenshot, ` +
+      `dispatched 1 input event${stayedBackground ? ", tab stayed in background." : " (warning: tab became active)."}`;
+    send(overlayTabId, { cmd: "done", cueId, summary });
+    await saveTaskState(cueId, {
+      status: "done",
+      instruction,
+      step: 1,
+      tabId: overlayTabId,
+      lastResult: summary.slice(0, 400),
+    });
+  } catch (err) {
+    const message = signal.aborted ? "Task cancelled." : `branch failed: ${String(err.message || err)}`;
+    send(overlayTabId, { cmd: signal.aborted ? "done" : "error", cueId, summary: message, text: message });
+    await saveTaskState(cueId, { status: signal.aborted ? "cancelled" : "error", instruction, lastResult: message, tabId: overlayTabId });
+  } finally {
+    if (attached) await debuggerDetach(target);
+    // Dispose the throwaway tab — task agents are disposable by design.
+    if (bgTabId != null) {
+      try {
+        await chrome.tabs.remove(bgTabId);
+      } catch {
+        // tab already closed
+      }
+    }
+    if (tasks.get(cueId)?.controller === controller) tasks.delete(cueId);
+  }
+}
+
 // Generate a cueId server-side if the content script didn't supply one, so old
 // callers still work. Each cue is independent — we never reject a new one.
 function nextCueId(provided) {
@@ -603,6 +783,14 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     const controller = new AbortController();
     tasks.set(cueId, { controller, tabId });
     runAgent(tabId, msg.instruction, controller, cueId);
+  }
+  if (msg.cmd === "branch" && sender.tab) {
+    // Router intent: launch a disposable task agent in its OWN background tab.
+    const overlayTabId = sender.tab.id;
+    const cueId = nextCueId(msg.cueId);
+    const controller = new AbortController();
+    tasks.set(cueId, { controller, tabId: overlayTabId });
+    runBranchTaskAgent(overlayTabId, msg.instruction, msg.url, controller, cueId);
   }
   if (msg.cmd === "describe" && sender.tab) {
     const tabId = sender.tab.id;

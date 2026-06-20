@@ -3,7 +3,7 @@
   "name": "agee",
   "version": "0.1.0",
   "description": "Open-source browser agent. Cmd+K, bring your own key. It sees your page and acts in it.",
-  "permissions": ["activeTab", "tabs", "scripting", "storage"],
+  "permissions": ["activeTab", "tabs", "scripting", "storage", "debugger"],
   "host_permissions": ["https://api.anthropic.com/*", "http://localhost/*", "http://10.147.17.10/*", "http://10.147.17.6/*"],
   "background": {
     "service_worker": "background.js",

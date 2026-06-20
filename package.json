@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node scripts/dev-extension.mjs",
     "smoke": "node scripts/smoke-extension.mjs",
+    "smoke:cdp": "node scripts/smoke-cdp.mjs",
     "smoke:gateway": "node scripts/smoke-gateway.mjs",
     "smoke:settings": "node scripts/smoke-settings.mjs",
     "verify": "node scripts/verify-extension.mjs"
