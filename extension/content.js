@@ -41,10 +41,6 @@
   let cueSeq = 0;
   const cues = new Map();
   const activeCues = new Set();
-  // Chat history is loaded exactly once per page load: the first time the
-  // overlay opens we fetch the persisted conversation and render it. Reopening
-  // must not refetch or duplicate rows.
-  let historyLoaded = false;
   // Replies are spoken one after another (parallel cues finishing together must
   // not talk over each other).
   const speechQueue = [];
@@ -54,7 +50,7 @@
     root = document.createElement("div");
     root.id = "agee-root";
     root.innerHTML = `
-      <button id="agee-launcher" type="button" title="Double-tap ⌘ to talk · ⌘. to type" aria-label="agee">
+      <button id="agee-launcher" type="button" title="⌘. to talk · ⌘, to type" aria-label="agee">
         <span class="agee-ring" aria-hidden="true"></span>
         <span class="agee-shadow" aria-hidden="true"></span>
         <svg class="agee-bird" viewBox="0 0 50 50" aria-hidden="true">
@@ -79,7 +75,7 @@
         </div>
         <div id="agee-bar">
           <span id="agee-dot"></span>
-          <input id="agee-input" placeholder="" autocomplete="off" />
+          <input id="agee-input" placeholder="Ask agee…  ⌘. to talk" autocomplete="off" />
           <button id="agee-voice" type="button" title="Speak instruction">Voice</button>
           <button id="agee-stop" type="button" title="Stop current task">Stop</button>
         </div>
@@ -216,42 +212,12 @@
     root.classList.toggle("agee-open", open);
     if (open) {
       setTimeout(() => input.focus(), 0);
-      loadHistoryOnce();
     }
   }
 
-  // On the first overlay open, pull the persisted conversation from the gateway
-  // and render each prior turn into the log: transcript as a "you" row, reply as
-  // an "agee" row. Guarded so reopening never refetches or duplicates rows.
-  // History is prepended so it always sits BEFORE any live turn that may have
-  // started while this async fetch was in flight.
-  function loadHistoryOnce() {
-    if (historyLoaded) return;
-    historyLoaded = true; // claim the slot up front so a fast reopen can't race a second fetch
-    let response;
-    try {
-      response = chrome.runtime.sendMessage({ cmd: "loadHistory" });
-    } catch {
-      return; // extension context gone; nothing to load
-    }
-    Promise.resolve(response)
-      .then((res) => {
-        const turns = Array.isArray(res?.turns) ? res.turns : [];
-        if (!turns.length || !log) return;
-        const fragment = document.createDocumentFragment();
-        for (const turn of turns) {
-          const transcript = String(turn?.transcript || "").trim();
-          const reply = String(turn?.reply || "").trim();
-          if (transcript) fragment.appendChild(makeRow("you", transcript));
-          if (reply) fragment.appendChild(makeRow("agee", reply));
-        }
-        // Prepend so restored history precedes any live cue cards already present.
-        log.insertBefore(fragment, log.firstChild);
-      })
-      .catch(() => {
-        // A history fetch failure must not break the overlay; leave it empty.
-      });
-  }
+  // No sessions, no history. The overlay shows only the live turns of this page
+  // load. Prior conversation is not fetched or rendered — context belongs to the
+  // agent, not a scrollback the user has to manage.
 
   function makeRow(who, text) {
     const row = document.createElement("div");
@@ -642,21 +608,35 @@
     startRecognition();
   }
 
-  // ---- Hotkeys: double-tap ⌘ = voice, ⌘. = text -----------------------
+  // ---- Hotkeys: ⌘. = voice, ⌘, = text, double-tap ⌘ = voice -----------
   // Two ways in, both hands-on-keyboard, no clicking:
-  //   double-tap ⌘ (or Ctrl)  → wake the agent and listen (and again to run)
-  //   ⌘.  (or Ctrl+.)         → open the text command bar
+  //   ⌘.  (or Ctrl+.)         → wake the agent and listen (speech); again to run
+  //   ⌘,  (or Ctrl+,)         → open the text command bar (type)
+  //   double-tap ⌘ (or Ctrl)  → same as ⌘. (kept as a no-chord shortcut)
   const DOUBLE_TAP_MS = 400;
   let lastMetaTap = 0;
 
-  function isTextHotkey(e) {
+  function isVoiceHotkey(e) {
     return (e.metaKey || e.ctrlKey) && e.key === ".";
+  }
+
+  function isTextHotkey(e) {
+    return (e.metaKey || e.ctrlKey) && e.key === ",";
   }
 
   window.addEventListener(
     "keydown",
     (e) => {
-      // ⌘. → text command bar.
+      // ⌘. → voice/speech.
+      if (isVoiceHotkey(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!root) build();
+        toggleVoiceSession();
+        lastMetaTap = 0;
+        return;
+      }
+      // ⌘, → text command bar.
       if (isTextHotkey(e)) {
         e.preventDefault();
         e.stopPropagation();

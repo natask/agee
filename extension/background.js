@@ -969,22 +969,8 @@ function cancelTabCues(tabId) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.cmd === "loadHistory") {
-    // Async reply: fetch the persisted conversation's turns for the overlay to
-    // render on open. Returning true keeps the message channel open for the
-    // async sendResponse. Failures resolve to an empty history (never block the
-    // overlay): { turns, error? }.
-    (async () => {
-      try {
-        const cfg = await getConfig();
-        const turns = await loadHistory(cfg);
-        sendResponse({ turns });
-      } catch (error) {
-        sendResponse({ turns: [], error: String(error?.message || error) });
-      }
-    })();
-    return true;
-  }
+  // No sessions: the overlay never asks for prior history. (loadHistory remains
+  // available to the gateway plumbing but is no longer wired to the surface.)
   if (msg.cmd === "run" && sender.tab) {
     const tabId = sender.tab.id;
     const cueId = nextCueId(msg.cueId);

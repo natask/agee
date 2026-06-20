@@ -158,16 +158,24 @@
   display: none;
   pointer-events: auto;
   position: absolute;
-  top: 14%;
+  top: 11%;
   left: 50%;
-  transform: translateX(-50%);
-  width: min(640px, 92vw);
-  background: #0d0d0f;
-  color: #f2f2f2;
-  border: 1px solid #2a2a2e;
-  border-radius: 14px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  transform: translateX(-50%) translateY(-6px);
+  width: min(600px, 92vw);
+  background: rgba(16, 16, 20, 0.86);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  color: #f4f4f6;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.3);
   overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+#agee-root.agee-open #agee-panel {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
 }
 #agee-root.agee-open #agee-panel {
   display: block;
@@ -231,16 +239,17 @@
 #agee-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 14px 16px;
-  border-bottom: 1px solid #1d1d20;
+  gap: 12px;
+  padding: 18px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 #agee-dot {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: #555;
+  background: #5a5a62;
   flex: 0 0 auto;
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.03);
 }
 #agee-dot.running {
   background: #f5a623;
@@ -262,29 +271,33 @@
   background: transparent;
   border: 0;
   outline: 0;
-  color: #f2f2f2;
-  font-size: 15px;
+  color: #f4f4f6;
+  font-size: 17px;
+  letter-spacing: 0.1px;
 }
 #agee-input::placeholder {
-  color: #6b6b70;
+  color: #6b6b73;
 }
 #agee-voice,
 #agee-stop {
   appearance: none;
-  border: 1px solid #34343a;
-  border-radius: 8px;
-  background: #19191d;
-  color: #d7d7dc;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #cfcfd6;
   cursor: pointer;
   flex: 0 0 auto;
   font: inherit;
   font-size: 12px;
+  font-weight: 500;
   line-height: 1;
-  padding: 8px 10px;
+  padding: 9px 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 #agee-voice:hover,
 #agee-stop:hover {
-  background: #222228;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
 }
 #agee-voice.listening {
   border-color: #f5a623;
