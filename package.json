@@ -8,6 +8,7 @@
     "smoke": "node scripts/smoke-extension.mjs",
     "smoke:cdp": "node scripts/smoke-cdp.mjs",
     "smoke:integration": "node scripts/smoke-integration.mjs",
+    "smoke:tweaks": "node scripts/smoke-tweaks.mjs",
     "smoke:gateway": "node scripts/smoke-gateway.mjs",
     "smoke:settings": "node scripts/smoke-settings.mjs",
     "smoke:history": "node scripts/smoke-history.mjs",
