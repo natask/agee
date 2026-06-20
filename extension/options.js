@@ -1,3 +1,4 @@
+import { getEffectiveGatewayConfig, normalizeGatewayUrl, seedGatewayConfig } from "./config.js";
 import { parseSettingsIntent, PROFILE_FIELDS } from "./settings-intent.js";
 
 const gatewayUrlEl = document.getElementById("gatewayUrl");
@@ -20,16 +21,16 @@ const profileStatusEl = document.getElementById("profileStatus");
 const PROFILE_CACHE_KEY = "ageeProfileCache";
 
 chrome.storage.local
-  .get(["ageeGatewayUrl", "ageeGatewayToken"])
-  .then(({ ageeGatewayUrl, ageeGatewayToken }) => {
-    if (ageeGatewayUrl) gatewayUrlEl.value = ageeGatewayUrl;
-    if (ageeGatewayToken) gatewayTokenEl.value = ageeGatewayToken;
+  .get(["ageeGatewayUrl"])
+  .then(async () => {
+    await seedGatewayConfig();
+    return getEffectiveGatewayConfig();
+  })
+  .then(({ gatewayUrl, gatewayToken }) => {
+    if (gatewayUrl) gatewayUrlEl.value = gatewayUrl;
+    if (gatewayToken) gatewayTokenEl.value = gatewayToken;
     loadProfile();
   });
-
-function normalizeGatewayUrl(value) {
-  return String(value || "").trim().replace(/\/+$/, "");
-}
 
 function flash(text, ok = true) {
   statusEl.textContent = text;

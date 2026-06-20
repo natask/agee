@@ -376,6 +376,41 @@ async function main() {
     // Install the fetch recorder in the service worker (gateway calls live there).
     await evaluate(workerCdp, INSTALL_FETCH_RECORDER);
 
+    // ---- Leg 1.0 — blank storage still uses the baked gateway URL ----
+    // Regression for a stale/fresh install where chrome.storage.local has no
+    // URL. The extension must not render "No gateway URL"; it should fall back
+    // to the baked main-machine URL and then fail loudly on auth if no token is
+    // present.
+    console.log("");
+    console.log("Leg 1.0 — blank URL storage falls back to baked gateway URL");
+    {
+      await evaluate(workerCdp, `
+        (async () => {
+          await chrome.storage.local.remove(["ageeGatewayUrl"]);
+          await chrome.storage.local.set({ ageeGatewayToken: "", ageeApiKey: "" });
+          if (globalThis.__ageeFetchLog) globalThis.__ageeFetchLog.length = 0;
+          return true;
+        })()
+      `);
+      await evaluate(pageCdp, triggerExpr("run", "say hello"), { contextId: contentCtx });
+      const reply = await waitForEval(pageCdp, renderedReplyExpr(), 20000, { contextId: contentCtx });
+      const call = await evaluate(workerCdp, lastGatewayCallExpr("/v1/voice/turns"));
+      const usedDefaultGateway = call && call.url && String(call.url).startsWith(`${GATEWAY_URL}/`);
+      const didNotShowMissingUrl = !/No gateway URL/i.test(reply?.text || "");
+      const reachedGateway = call && (call.status === 401 || call.ok === true);
+      if (usedDefaultGateway && didNotShowMissingUrl && reachedGateway) {
+        pass(
+          "blank URL storage reached the baked gateway",
+          `POST /v1/voice/turns -> HTTP ${call.status}; no missing-URL overlay error`,
+        );
+      } else {
+        failures++;
+        console.log("  [FAIL] blank URL storage did not fall back to the baked gateway.");
+        console.log(`         rendered: ${JSON.stringify(reply)}`);
+        console.log(`         recorded gateway call: ${JSON.stringify(call)}`);
+      }
+    }
+
     // ---- Leg 1.4 prerequisite is independent; run health first ----
     console.log("");
     console.log("Leg 1.1 — /health (no token required)");

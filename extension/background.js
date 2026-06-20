@@ -3,47 +3,16 @@
 // provider API keys and no direct model calls live in the browser; the gateway
 // owns model routing and credentials.
 
+import { getEffectiveGatewayConfig, seedGatewayConfig } from "./config.js";
 import { parseSettingsIntent, parseProfileQueryIntent } from "./settings-intent.js";
-
-// Baked defaults so a fresh install works with no Options visit. The gateway URL
-// is safe to ship in code; the token is injected locally by `npm run configure`
-// into the git-ignored agee.config.json. Loaded at runtime via fetch (MV3
-// service workers forbid top-level await, so no import here). A missing config
-// file just means "configure has not been run yet" — the URL fallback applies.
-const BAKED_FALLBACK = { gatewayUrl: "http://10.147.17.10:8788", gatewayToken: "" };
-let bakedCache = null;
-
-async function getBaked() {
-  if (bakedCache) return bakedCache;
-  try {
-    const resp = await fetch(chrome.runtime.getURL("agee.config.json"));
-    if (resp.ok) {
-      const cfg = await resp.json();
-      bakedCache = {
-        gatewayUrl: String(cfg.gatewayUrl || BAKED_FALLBACK.gatewayUrl),
-        gatewayToken: String(cfg.gatewayToken || ""),
-      };
-      return bakedCache;
-    }
-  } catch {
-    // No local config yet; the URL fallback keeps the agent usable for any
-    // endpoint that does not require the token (e.g. /health).
-  }
-  bakedCache = { ...BAKED_FALLBACK };
-  return bakedCache;
-}
 
 // Seed storage from the baked defaults on install/update so the Options page
 // shows the live values and the user never has to fill them in by hand. Only
 // fills blanks — a value the user typed always wins.
 chrome.runtime.onInstalled.addListener(async () => {
-  const baked = await getBaked();
-  const cur = await chrome.storage.local.get(["ageeGatewayUrl", "ageeGatewayToken"]);
-  const patch = {};
-  if (!cur.ageeGatewayUrl && baked.gatewayUrl) patch.ageeGatewayUrl = baked.gatewayUrl;
-  if (!cur.ageeGatewayToken && baked.gatewayToken) patch.ageeGatewayToken = baked.gatewayToken;
-  if (Object.keys(patch).length) await chrome.storage.local.set(patch);
+  await seedGatewayConfig();
 });
+void seedGatewayConfig();
 const MAX_ELEMENTS = 100;
 const ALLOWED_NAVIGATION_PROTOCOLS = new Set(["http:", "https:"]);
 // Cues run concurrently: the user keeps talking, each utterance is its own lane.
@@ -52,20 +21,7 @@ const ALLOWED_NAVIGATION_PROTOCOLS = new Set(["http:", "https:"]);
 const tasks = new Map();
 
 async function getConfig() {
-  const stored = await chrome.storage.local.get([
-    "ageeGatewayUrl",
-    "ageeGatewayToken",
-  ]);
-  // Fall back to the baked defaults so the agent works before storage is seeded
-  // (e.g. the very first turn after install, or on a page that loaded the worker
-  // before onInstalled ran). A stored value always overrides the default.
-  const baked = await getBaked();
-  const hasStoredUrl = Object.prototype.hasOwnProperty.call(stored, "ageeGatewayUrl");
-  const hasStoredToken = Object.prototype.hasOwnProperty.call(stored, "ageeGatewayToken");
-  return {
-    gatewayUrl: String(hasStoredUrl ? stored.ageeGatewayUrl || "" : baked.gatewayUrl || "").replace(/\/+$/, ""),
-    gatewayToken: String(hasStoredToken ? stored.ageeGatewayToken || "" : baked.gatewayToken || ""),
-  };
+  return getEffectiveGatewayConfig();
 }
 
 // Pipe a request into the user's own agent gateway instead of the model vendor.

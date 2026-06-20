@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 const requiredFiles = [
   "extension/manifest.json",
   "extension/background.js",
+  "extension/config.js",
   "extension/content.js",
   "extension/tweaks.js",
   "extension/options.html",
@@ -48,6 +49,7 @@ if (!manifest.commands?.["toggle-agee"]) {
 
 for (const file of [
   "extension/background.js",
+  "extension/config.js",
   "extension/content.js",
   "extension/tweaks.js",
   "extension/options.js",
